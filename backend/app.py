@@ -11,7 +11,13 @@ import uuid
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["https://carspital.co.ke", "https://eliombogo.com", "http://localhost:*"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
 
 # Database connection
 def get_db_connection():
