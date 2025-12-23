@@ -1,0 +1,32 @@
+<!-- Chat Widget - Add this to landing page hero section -->
+<div class="nuru-chat-widget">
+    <div class="chat-widget-header">
+        <div class="status-indicator"></div>
+        <span class="widget-title">Nuru AI</span>
+        <span class="widget-badge">Live</span>
+    </div>
+    
+    <div class="chat-widget-messages" id="chatMessages">
+        <div class="widget-message ai">
+            <div class="message-avatar">🤖</div>
+            <div class="message-bubble">
+                Hi! I'm Nuru. What brings you here today?
+            </div>
+        </div>
+    </div>
+    
+    <div class="chat-widget-input">
+        <input 
+            type="text" 
+            id="nuruInput" 
+            placeholder="Type your message..."
+            onkeypress="handleNuruKeyPress(event)"
+        >
+        <button onclick="sendNuruMessage()" class="send-btn">
+            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
+        </button>
+    </div>
+</div>
