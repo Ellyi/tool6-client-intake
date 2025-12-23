@@ -13,9 +13,16 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app, resources={
     r"/api/*": {
-        "origins": ["https://carspital.co.ke", "https://eliombogo.com", "http://localhost:*"],
+        "origins": [
+            "https://carspital.co.ke", 
+            "http://carspital.co.ke",  # ADD THIS
+            "https://eliombogo.com",
+            "http://eliombogo.com",    # ADD THIS
+            "http://localhost:*"
+        ],
         "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
+        "allow_headers": ["Content-Type"],
+        "supports_credentials": True
     }
 })
 
