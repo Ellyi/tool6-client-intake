@@ -28,6 +28,57 @@ def get_db_connection():
 # Claude client
 claude_client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 
+# Auto-create tables on first run
+def init_db():
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id SERIAL PRIMARY KEY,
+                session_id VARCHAR(255) UNIQUE NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            
+            CREATE TABLE IF NOT EXISTS messages (
+                id SERIAL PRIMARY KEY,
+                conversation_id INTEGER REFERENCES conversations(id),
+                role VARCHAR(50) NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            
+            CREATE TABLE IF NOT EXISTS leads (
+                id SERIAL PRIMARY KEY,
+                conversation_id INTEGER REFERENCES conversations(id),
+                email VARCHAR(255),
+                phone VARCHAR(50),
+                budget VARCHAR(100),
+                timeline VARCHAR(100),
+                qualified BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            
+            CREATE TABLE IF NOT EXISTS context_data (
+                id SERIAL PRIMARY KEY,
+                conversation_id INTEGER REFERENCES conversations(id),
+                location VARCHAR(100),
+                payment_method VARCHAR(100),
+                communication_channel VARCHAR(100),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        """)
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        print("✅ Database tables ready")
+    except Exception as e:
+        print(f"DB init: {e}")
+
+init_db()
+
 # System prompt for conversation
 SYSTEM_PROMPT = """You are Nuru, the intelligent client intake assistant for LocalOS.
 
