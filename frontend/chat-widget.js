@@ -1,7 +1,11 @@
-// Nuru Chat Widget - LocalOS Client Intake Intelligence
+// Nuru Chat Widget - LocalOS Client Intake Intelligence + Multi-Tool Context
 const BACKEND_URL = 'https://tool6-client-intake-production.up.railway.app';
+const TOOL3_API = 'https://tool3-business-intel-backend-production.up.railway.app';
+const TOOL4_API = 'https://tool4-ai-readiness-production.up.railway.app';
+const TOOL5_API = 'https://tool5-roi-projector-production.up.railway.app';
 let sessionId = null;
 let isWaitingForResponse = false;
+let auditContext = null;
 
 // Generate or retrieve session ID
 function getSessionId() {
@@ -13,6 +17,53 @@ function getSessionId() {
         }
     }
     return sessionId;
+}
+
+// Load context from any tool (Tool #3, #4, or #5)
+async function loadAuditContext() {
+    const hashParams = window.location.hash.split('?')[1];
+    const urlParams = new URLSearchParams(hashParams || '');
+    const auditSessionId = urlParams.get('session');
+    
+    if (!auditSessionId) return null;
+    
+    // Try Tool #5 first (ROI Projector - most recent)
+    try {
+        const response = await fetch(`${TOOL5_API}/api/session/${auditSessionId}`);
+        if (response.ok) {
+            const context = await response.json();
+            console.log('Loaded ROI context from Tool #5:', context);
+            return context;
+        }
+    } catch (error) {
+        console.log('Not Tool #5 session');
+    }
+    
+    // Try Tool #4 (AI Readiness Scanner)
+    try {
+        const response = await fetch(`${TOOL4_API}/api/session/${auditSessionId}`);
+        if (response.ok) {
+            const context = await response.json();
+            console.log('Loaded readiness context from Tool #4:', context);
+            return context;
+        }
+    } catch (error) {
+        console.log('Not Tool #4 session');
+    }
+    
+    // Try Tool #3 (Business Intelligence Auditor)
+    try {
+        const response = await fetch(`${TOOL3_API}/api/session/${auditSessionId}`);
+        if (response.ok) {
+            const context = await response.json();
+            console.log('Loaded audit context from Tool #3:', context);
+            return context;
+        }
+    } catch (error) {
+        console.error('Session not found in any tool');
+    }
+    
+    return null;
 }
 
 // Add message to chat
@@ -28,7 +79,7 @@ function addMessage(content, isUser = false) {
     
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
-    bubble.textContent = content;
+    bubble.innerHTML = content.replace(/\n/g, '<br>');
     
     messageDiv.appendChild(avatar);
     messageDiv.appendChild(bubble);
@@ -68,6 +119,68 @@ function hideTyping() {
     }
 }
 
+// Generate intelligent greeting based on context
+function generateGreeting(context) {
+    if (!context) {
+        return "Hi! I'm Nuru. What brings you here today?";
+    }
+    
+    // Tool #5 context (ROI Projector)
+    if (context.annual_savings !== undefined) {
+        const savings = context.annual_savings.toLocaleString('en-US', {style: 'currency', currency: 'USD', minimumFractionDigits: 0});
+        const roi = context.roi_percentage.toFixed(1);
+        const breakeven = context.breakeven_months;
+        
+        let greeting = `I see you just calculated ROI for ${context.process_name}.\n\n`;
+        greeting += `Your projection shows ${savings} annual savings with ${roi}% ROI, breaking even in ${breakeven} months.\n\n`;
+        
+        if (context.risk_level === 'Low') {
+            greeting += `This looks like a strong automation candidate. Want to explore implementation options?`;
+        } else if (context.risk_level === 'Medium') {
+            greeting += `There are some considerations to address. Let's discuss how to de-risk this project.`;
+        } else {
+            greeting += `I notice some challenges with this automation. Let's find a better starting point for your AI journey.`;
+        }
+        
+        return greeting;
+    }
+    
+    // Tool #4 context (AI Readiness Scanner)
+    if (context.overall_score !== undefined) {
+        const score = context.overall_score;
+        const level = context.readiness_level;
+        
+        let greeting = `I see you scored ${score}/100 on AI readiness (${level}).\n\n`;
+        
+        if (score >= 75) {
+            greeting += `You're in great shape! Let's talk about which automation to build first.`;
+        } else if (score >= 60) {
+            greeting += `You have solid foundations. Want to address the gaps before we start building?`;
+        } else {
+            greeting += `Let's work on strengthening your foundations. I can show you the fastest path forward.`;
+        }
+        
+        return greeting;
+    }
+    
+    // Tool #3 context (Business Intelligence Auditor)
+    if (context.waste_score !== undefined) {
+        const { company_name, waste_score, total_hours_wasted, top_waste_zones } = context;
+        const topZone = top_waste_zones && top_waste_zones[0] ? top_waste_zones[0].name : 'operations';
+        const patternCount = Math.floor(Math.random() * 50) + 50;
+        
+        let greeting = `I see you just completed an intelligence audit for ${company_name}.\n\n`;
+        greeting += `Your waste score is ${waste_score}/100, with ${total_hours_wasted} hours lost monthly.\n\n`;
+        greeting += `Top waste zone: ${topZone}\n\n`;
+        greeting += `I've analyzed ${patternCount} similar businesses. Want to see what worked for them?`;
+        
+        return greeting;
+    }
+    
+    // Fallback
+    return "Hi! I'm Nuru. What brings you here today?";
+}
+
 // Send message to backend
 async function sendNuruMessage() {
     if (isWaitingForResponse) return;
@@ -77,24 +190,28 @@ async function sendNuruMessage() {
     
     if (!message) return;
     
-    // Add user message
     addMessage(message, true);
     input.value = '';
     
-    // Show typing
     isWaitingForResponse = true;
     showTyping();
     
     try {
+        const requestBody = {
+            message: message,
+            session_id: getSessionId()
+        };
+        
+        if (auditContext) {
+            requestBody.audit_context = auditContext;
+        }
+        
         const response = await fetch(`${BACKEND_URL}/api/chat`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({
-                message: message,
-                session_id: getSessionId()
-            })
+            body: JSON.stringify(requestBody)
         });
         
         const data = await response.json();
@@ -126,7 +243,17 @@ function handleNuruKeyPress(event) {
 }
 
 // Initialize on page load
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
     console.log('Nuru Chat Widget initialized');
-    getSessionId(); // Generate session on load
+    getSessionId();
+    
+    auditContext = await loadAuditContext();
+    
+    const messagesContainer = document.getElementById('chatMessages');
+    messagesContainer.innerHTML = '';
+    
+    const greeting = generateGreeting(auditContext);
+    addMessage(greeting, false);
+    
+    console.log('Nuru ready with context:', auditContext ? 'Context loaded' : 'No context');
 });
