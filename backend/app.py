@@ -29,6 +29,30 @@ def get_db_connection():
 # Claude client
 claude_client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 
+# Load system prompt from file
+def load_system_prompt():
+    """Load system prompt from system_prompt.txt"""
+    try:
+        # Try current directory first (Railway deployment)
+        with open('system_prompt.txt', 'r', encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        try:
+            # Try backend subdirectory (local development)
+            with open('../system_prompt.txt', 'r', encoding='utf-8') as f:
+                return f.read()
+        except FileNotFoundError:
+            # Fallback to basic prompt if file not found
+            print("⚠️ WARNING: system_prompt.txt not found, using fallback")
+            return """You are Nuru, the intelligent client intake assistant for LocalOS.
+            
+Qualify potential clients by understanding their business context and identifying real problems.
+Be helpful, conversational, and honest. Escalate complex/high-value opportunities to Eli."""
+
+# Load system prompt at startup
+SYSTEM_PROMPT = load_system_prompt()
+print(f"✅ System prompt loaded ({len(SYSTEM_PROMPT)} characters)")
+
 # Load context from Tools #3, #4, #5
 def load_audit_context(session_id):
     """Load audit context from other tools"""
@@ -69,6 +93,69 @@ def load_audit_context(session_id):
     
     return contexts
 
+# Escalation webhook to notify Eli
+def notify_eli_qualified_lead(conversation_id, lead_data, audit_contexts):
+    """Send notification to Eli when qualified lead detected"""
+    try:
+        # Build notification message
+        message = f"""🎯 QUALIFIED LEAD - LocalOS
+
+LEAD DETAILS:
+Company: {lead_data.get('company', 'Not provided')}
+Industry: {lead_data.get('industry', 'Not provided')}
+Contact: {lead_data.get('email', 'Not provided')}
+
+QUALIFICATION:
+Budget: {lead_data.get('budget', 'Not stated')}
+Timeline: {lead_data.get('timeline', 'Not stated')}
+Problem: {lead_data.get('problem', 'See conversation')}
+
+AUDIT DATA:"""
+        
+        if 'tool3' in audit_contexts:
+            ctx = audit_contexts['tool3']
+            message += f"""
+Tool #3 Score: {ctx.get('waste_score')}/100
+Top Waste Zone: {ctx['top_waste_zones'][0]['name'] if ctx.get('top_waste_zones') else 'N/A'}
+Hours Wasted: {ctx.get('total_hours_wasted')}/month"""
+        
+        if 'tool4' in audit_contexts:
+            ctx = audit_contexts['tool4']
+            message += f"""
+Tool #4 Readiness: {ctx.get('readiness_score')}/100"""
+        
+        if 'tool5' in audit_contexts:
+            ctx = audit_contexts['tool5']
+            message += f"""
+Tool #5 ROI: ${ctx.get('annual_savings'):,} annual savings"""
+        
+        message += f"""
+
+CONVERSATION ID: {conversation_id}
+
+ACTION: Reply to contact or review conversation in database.
+"""
+        
+        # Send to webhook (Google Sheets for now)
+        webhook_url = "https://script.google.com/macros/s/AKfycbw_DUBZMbh47xMP5Lg83Q04o66oDQFwdO6qM7pixoN4BzVLkR9iz4EiT2WrPU2NTAANlw/exec"
+        
+        requests.post(
+            webhook_url,
+            json={
+                'type': 'qualified_lead',
+                'timestamp': datetime.now().isoformat(),
+                'message': message,
+                'lead_data': lead_data,
+                'conversation_id': conversation_id
+            },
+            timeout=5
+        )
+        
+        print(f"✅ Eli notified of qualified lead (conversation {conversation_id})")
+        
+    except Exception as e:
+        print(f"⚠️ Failed to notify Eli: {e}")
+
 # Auto-create tables on first run
 def init_db():
     try:
@@ -98,6 +185,7 @@ def init_db():
                 budget VARCHAR(100),
                 timeline VARCHAR(100),
                 qualified BOOLEAN DEFAULT FALSE,
+                notified_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             
@@ -119,58 +207,6 @@ def init_db():
         print(f"DB init: {e}")
 
 init_db()
-
-# System prompt with Tentacles approach
-SYSTEM_PROMPT = """You are Nuru, the intelligent client intake assistant for LocalOS.
-
-CONTEXT AWARENESS - CRITICAL:
-If you receive audit context in the conversation:
-- Tool #3 data = Intelligence waste audit (waste_score, top waste zones, hours wasted)
-- Tool #4 data = AI readiness assessment (readiness_score, blocking factors)
-- Tool #5 data = ROI projection (annual_savings, payback_months)
-
-ALWAYS reference their specific results naturally:
-"I see from your audit that [specific finding]. Let me help you with that..."
-
-YOUR ROLE:
-Qualify potential clients by understanding their business context, identifying real problems, and detecting cultural/payment/communication patterns.
-
-TENTACLES BUDGET APPROACH (CRITICAL):
-- NO budget gatekeeping - welcome ANY serious budget
-- Scope adapts to budget: $500 = micro-solution, $5K = full workflow, $20K = platform
-- When user states budget, respond with:
-  "With [budget], here's what we can build: [scope]
-   For comparison, [higher budget] gets you: [more scope]
-   Which matches your needs right now?"
-- Natural education through options, not rejection
-- Show Tentacles capability: "We can build this using [components]"
-
-QUALIFICATION CRITERIA:
-✅ ESCALATE TO ELI when:
-- Budget stated (any amount) + Timeline realistic + Problem clear
-- Serious signals: specific pain, asked intelligent questions, completed tools
-
-❌ DON'T ESCALATE when:
-- Vague answers only ("just exploring", "maybe someday")
-- Unrealistic timeline + no flexibility
-- No clear problem articulated
-- Tire-kicker signals
-
-CONTEXT DETECTION (GLOBAL):
-- Location: USA, UK, Canada, Australia, South Africa, UAE, China, Germany, France, Brazil, Mexico, Singapore, Philippines, Egypt, Kenya, Nigeria, India
-- Payment: Stripe, PayPal, M-Pesa, UPI, WeChat Pay, Alipay, PIX, GCash, Zelle, Bank Transfer, SEPA
-- Communication: WhatsApp (Africa/Asia/LatAm), Email (Western/formal), WeChat (China)
-- Adapt recommendations based on real-world context
-
-CONVERSATION APPROACH:
-1. Reference audit results if available (builds instant credibility)
-2. Ask about their business and specific problem
-3. Detect context signals naturally (location, payment, communication)
-4. When budget discussed, show Tentacles options at that budget
-5. Qualify based on seriousness, not budget size
-6. Be conversational, helpful, real - not robotic
-
-Be helpful to EVERYONE, but protective of Eli's time against tire-kickers."""
 
 
 @app.route('/api/chat', methods=['POST'])
@@ -278,6 +314,9 @@ def chat():
         # Detect context (expanded globally)
         detect_and_save_context(conversation_id, user_message, assistant_message, cur)
         
+        # Check for qualification triggers in assistant response
+        check_qualification(conversation_id, assistant_message, audit_contexts, cur)
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -324,7 +363,7 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
         location = 'UAE'
     
     # Americas
-    elif 'new york' in combined_text or 'los angeles' in combined_text or 'chicago' in combined_text or 'san francisco' in combined_text or 'usa' in combined_text or 'united states' in combined_text:
+    elif 'new york' in combined_text or 'los angeles' in combined_text or 'chicago' in combined_text or 'san francisco' in combined_text or 'usa' in combined_text or 'united states' in combined_text or 'colorado' in combined_text:
         location = 'USA'
     elif 'toronto' in combined_text or 'vancouver' in combined_text or 'canada' in combined_text:
         location = 'Canada'
@@ -387,6 +426,51 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
                VALUES (%s, %s, %s, %s)""",
             (conversation_id, location, payment, communication)
         )
+
+
+def check_qualification(conversation_id, assistant_message, audit_contexts, cursor):
+    """Check if conversation signals qualified lead - notify Eli if yes"""
+    
+    # Qualification triggers (from Blueprint)
+    qualified = False
+    lead_data = {}
+    
+    # Parse assistant message for qualification signals
+    msg_lower = assistant_message.lower()
+    
+    # Budget stated (any amount)
+    if '$' in assistant_message or 'budget' in msg_lower:
+        qualified = True
+        lead_data['budget'] = 'Stated in conversation'
+    
+    # Book call mentioned
+    if 'book' in msg_lower and 'call' in msg_lower:
+        qualified = True
+    
+    # Explicit escalation language
+    if 'eli' in msg_lower and ('connect' in msg_lower or 'talk' in msg_lower or 'discuss' in msg_lower):
+        qualified = True
+    
+    # If qualified, save lead and notify Eli
+    if qualified:
+        # Check if already notified
+        cursor.execute(
+            "SELECT id FROM leads WHERE conversation_id = %s AND notified_at IS NOT NULL",
+            (conversation_id,)
+        )
+        already_notified = cursor.fetchone()
+        
+        if not already_notified:
+            # Save lead record
+            cursor.execute(
+                """INSERT INTO leads (conversation_id, budget, qualified, notified_at)
+                   VALUES (%s, %s, %s, NOW())
+                   RETURNING id""",
+                (conversation_id, lead_data.get('budget', 'See conversation'), True)
+            )
+            
+            # Notify Eli
+            notify_eli_qualified_lead(conversation_id, lead_data, audit_contexts)
 
 
 @app.route('/api/health', methods=['GET'])
