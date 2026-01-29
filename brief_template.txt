@@ -1,0 +1,58 @@
+# LEAD BRIEF: [Business Name]
+
+## FIT SCORE: [0-100]%
+[Brief explanation why this score]
+
+## BUSINESS CONTEXT
+- Industry: [E-commerce/SaaS/Services/etc]
+- Location: [City, Country]
+- Website: [URL]
+- Size: [Team size, revenue estimate if mentioned]
+
+## CURRENT TECH STACK
+- Platform: [WordPress/Shopify/Custom/etc]
+- Payment: [Gateway used]
+- Communication: [Email/WhatsApp/etc]
+- Other tools: [CRM, Analytics, etc]
+
+## PROBLEM ANALYSIS
+**Stated Need:** "[What they said]"
+**Actual Problem:** [What you diagnosed]
+**Evidence:** [How you know]
+
+## RECOMMENDED SOLUTION
+**[Solution Name]**
+Features:
+1. [Feature 1]
+2. [Feature 2]
+3. [Feature 3]
+
+Tech Stack:
+- Backend: [Technology]
+- Integration: [APIs needed]
+- Database: [Database type]
+- Hosting: [Platform]
+
+## PROJECT ESTIMATE
+- Timeline: [Weeks]
+- Cost: $[Low] - $[High]
+- Complexity: [Low/Medium/High]
+
+## ROI FOR CLIENT
+- [Benefit 1 with metric]
+- [Benefit 2 with metric]
+- [Benefit 3 with metric]
+
+## RESEARCH COMPLETED
+✅ [What you researched]
+✅ [What you found]
+✅ [Insights gained]
+
+## ROUTING DECISION
+[QUALIFIED - Priority / QUALIFIED - Standard / NEEDS MORE INFO / NOT QUALIFIED]
+
+Reason: [Why this routing]
+
+## NEXT STEPS
+- [ ] [Action 1]
+- [ ] [Action 2]
