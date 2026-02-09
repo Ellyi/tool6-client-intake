@@ -182,8 +182,6 @@ def init_db():
                 conversation_id INTEGER REFERENCES conversations(id),
                 email VARCHAR(255),
                 phone VARCHAR(50),
-                budget VARCHAR(100),
-                timeline VARCHAR(100),
                 qualified BOOLEAN DEFAULT FALSE,
                 notified_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -461,12 +459,12 @@ def check_qualification(conversation_id, assistant_message, audit_contexts, curs
         already_notified = cursor.fetchone()
         
         if not already_notified:
-            # Save lead record
+            # FIXED: Removed budget column from INSERT (database doesn't have it yet)
             cursor.execute(
-                """INSERT INTO leads (conversation_id, budget, qualified, notified_at)
-                   VALUES (%s, %s, %s, NOW())
+                """INSERT INTO leads (conversation_id, qualified, notified_at)
+                   VALUES (%s, %s, NOW())
                    RETURNING id""",
-                (conversation_id, lead_data.get('budget', 'See conversation'), True)
+                (conversation_id, True)
             )
             
             # Notify Eli
