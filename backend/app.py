@@ -33,16 +33,13 @@ claude_client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 def load_system_prompt():
     """Load system prompt from system_prompt.txt"""
     try:
-        # Try current directory first (Railway deployment)
         with open('system_prompt.txt', 'r', encoding='utf-8') as f:
             return f.read()
     except FileNotFoundError:
         try:
-            # Try backend subdirectory (local development)
             with open('../system_prompt.txt', 'r', encoding='utf-8') as f:
                 return f.read()
         except FileNotFoundError:
-            # Fallback to basic prompt if file not found
             print("⚠️ WARNING: system_prompt.txt not found, using fallback")
             return """You are Nuru, the intelligent client intake assistant for LocalOS.
             
@@ -58,7 +55,6 @@ def load_audit_context(session_id):
     """Load audit context from other tools"""
     contexts = {}
     
-    # Try Tool #3 (Business Intelligence Auditor)
     try:
         response = requests.get(
             f'https://tool3-business-intel-backend-production.up.railway.app/api/session/{session_id}',
@@ -69,7 +65,6 @@ def load_audit_context(session_id):
     except:
         pass
     
-    # Try Tool #4 (AI Readiness Scanner)
     try:
         response = requests.get(
             f'https://tool4-ai-readiness-production.up.railway.app/api/session/{session_id}',
@@ -80,7 +75,6 @@ def load_audit_context(session_id):
     except:
         pass
     
-    # Try Tool #5 (ROI Projector)
     try:
         response = requests.get(
             f'https://tool5-roi-projector-production.up.railway.app/api/session/{session_id}',
@@ -97,7 +91,6 @@ def load_audit_context(session_id):
 def notify_eli_qualified_lead(conversation_id, lead_data, audit_contexts):
     """Send notification to Eli when qualified lead detected"""
     try:
-        # Build notification message
         message = f"""🎯 QUALIFIED LEAD - LocalOS
 
 LEAD DETAILS:
@@ -136,7 +129,6 @@ CONVERSATION ID: {conversation_id}
 ACTION: Reply to contact or review conversation in database.
 """
         
-        # Send to webhook (Google Sheets for now)
         webhook_url = "https://script.google.com/macros/s/AKfycbw_DUBZMbh47xMP5Lg83Q04o66oDQFwdO6qM7pixoN4BzVLkR9iz4EiT2WrPU2NTAANlw/exec"
         
         requests.post(
@@ -156,23 +148,35 @@ ACTION: Reply to contact or review conversation in database.
     except Exception as e:
         print(f"⚠️ Failed to notify Eli: {e}")
 
+
 # Auto-create tables on first run
 def init_db():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
+        # Drop existing tables if schema is wrong (one-time migration fix)
+        # Remove these DROP lines after first successful deployment
+        cur.execute("DROP TABLE IF EXISTS context_data CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS leads CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS messages CASCADE;")
+        cur.execute("DROP TABLE IF EXISTS conversations CASCADE;")
+        print("🔄 Dropped old tables for schema migration")
+        
         cur.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
                 id SERIAL PRIMARY KEY,
                 session_id VARCHAR(255) UNIQUE NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                status VARCHAR(50) DEFAULT 'active',
+                lead_quality_score INTEGER DEFAULT 0
             );
             
             CREATE TABLE IF NOT EXISTS messages (
                 id SERIAL PRIMARY KEY,
                 conversation_id INTEGER REFERENCES conversations(id),
-                role VARCHAR(50) NOT NULL,
+                role VARCHAR(20) NOT NULL,
                 content TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -180,9 +184,18 @@ def init_db():
             CREATE TABLE IF NOT EXISTS leads (
                 id SERIAL PRIMARY KEY,
                 conversation_id INTEGER REFERENCES conversations(id),
+                business_name VARCHAR(255),
+                contact_name VARCHAR(255),
                 email VARCHAR(255),
                 phone VARCHAR(50),
-                qualified BOOLEAN DEFAULT FALSE,
+                problem_description TEXT,
+                budget_range VARCHAR(100),
+                timeline VARCHAR(100),
+                location VARCHAR(255),
+                payment_context VARCHAR(100),
+                communication_preference VARCHAR(100),
+                language_detected VARCHAR(50),
+                qualification_status VARCHAR(50) DEFAULT 'pending',
                 notified_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
@@ -190,17 +203,20 @@ def init_db():
             CREATE TABLE IF NOT EXISTS context_data (
                 id SERIAL PRIMARY KEY,
                 conversation_id INTEGER REFERENCES conversations(id),
-                location VARCHAR(100),
+                location VARCHAR(255),
                 payment_method VARCHAR(100),
                 communication_channel VARCHAR(100),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                language VARCHAR(50),
+                industry VARCHAR(255),
+                tech_stack TEXT,
+                detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
         
         conn.commit()
         cur.close()
         conn.close()
-        print("✅ Database tables ready")
+        print("✅ Database tables ready (full schema)")
     except Exception as e:
         print(f"DB init: {e}")
 
@@ -280,20 +296,18 @@ def chat():
                 context_message += f"- Implementation Cost: ${ctx.get('implementation_cost'):,}\n"
                 context_message += f"- Payback Period: {ctx.get('payback_months')} months\n"
             
-            # Inject context before user's first message
             messages.append({
                 "role": "user",
                 "content": context_message + f"\n\nUser's first message: {user_message}"
             })
         else:
-            # Regular conversation flow
             for msg in history:
                 messages.append({
                     "role": msg['role'],
                     "content": msg['content']
                 })
         
-        # Call Claude
+        # Call Claude - using Sonnet for cost efficiency
         response = claude_client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=1000,
@@ -309,10 +323,10 @@ def chat():
             (conversation_id, 'assistant', assistant_message)
         )
         
-        # Detect context (expanded globally)
+        # Detect context
         detect_and_save_context(conversation_id, user_message, assistant_message, cur)
         
-        # Check for qualification triggers in assistant response
+        # Check for qualification triggers
         check_qualification(conversation_id, assistant_message, audit_contexts, cur)
         
         conn.commit()
@@ -333,10 +347,8 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
     
     combined_text = (user_msg + " " + assistant_msg).lower()
     
-    # Location detection - EXPANDED GLOBALLY
+    # Location detection
     location = None
-    
-    # Africa
     if 'nairobi' in combined_text or 'kenya' in combined_text:
         location = 'Kenya'
     elif 'lagos' in combined_text or 'nigeria' in combined_text:
@@ -345,8 +357,6 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
         location = 'South Africa'
     elif 'cairo' in combined_text or 'egypt' in combined_text:
         location = 'Egypt'
-    
-    # Asia
     elif 'mumbai' in combined_text or 'india' in combined_text or 'delhi' in combined_text:
         location = 'India'
     elif 'beijing' in combined_text or 'shanghai' in combined_text or 'china' in combined_text:
@@ -355,12 +365,8 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
         location = 'Singapore'
     elif 'manila' in combined_text or 'philippines' in combined_text:
         location = 'Philippines'
-    
-    # Middle East
     elif 'dubai' in combined_text or 'abu dhabi' in combined_text or 'uae' in combined_text:
         location = 'UAE'
-    
-    # Americas
     elif 'new york' in combined_text or 'los angeles' in combined_text or 'chicago' in combined_text or 'san francisco' in combined_text or 'usa' in combined_text or 'united states' in combined_text or 'colorado' in combined_text:
         location = 'USA'
     elif 'toronto' in combined_text or 'vancouver' in combined_text or 'canada' in combined_text:
@@ -369,20 +375,16 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
         location = 'Brazil'
     elif 'mexico city' in combined_text or 'mexico' in combined_text:
         location = 'Mexico'
-    
-    # Europe
     elif 'london' in combined_text or 'manchester' in combined_text or 'uk' in combined_text or 'united kingdom' in combined_text:
         location = 'UK'
     elif 'berlin' in combined_text or 'munich' in combined_text or 'germany' in combined_text:
         location = 'Germany'
     elif 'paris' in combined_text or 'france' in combined_text:
         location = 'France'
-    
-    # Oceania
     elif 'sydney' in combined_text or 'melbourne' in combined_text or 'australia' in combined_text:
         location = 'Australia'
     
-    # Payment detection - EXPANDED GLOBALLY
+    # Payment detection
     payment = None
     if 'm-pesa' in combined_text or 'mpesa' in combined_text:
         payment = 'M-Pesa'
@@ -416,7 +418,6 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
     elif 'wechat' in combined_text:
         communication = 'WeChat'
     
-    # Save if we detected anything
     if location or payment or communication:
         cursor.execute(
             """INSERT INTO context_data 
@@ -429,29 +430,23 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
 def check_qualification(conversation_id, assistant_message, audit_contexts, cursor):
     """Check if conversation signals qualified lead - notify Eli if yes"""
     
-    # Qualification triggers (from Blueprint)
     qualified = False
     lead_data = {}
     
-    # Parse assistant message for qualification signals
     msg_lower = assistant_message.lower()
     
-    # Budget stated (any amount)
     if '$' in assistant_message or 'budget' in msg_lower:
         qualified = True
         lead_data['budget'] = 'Stated in conversation'
     
-    # Book call mentioned
     if 'book' in msg_lower and 'call' in msg_lower:
         qualified = True
     
-    # Explicit escalation language
     if 'eli' in msg_lower and ('connect' in msg_lower or 'talk' in msg_lower or 'discuss' in msg_lower):
         qualified = True
     
-    # If qualified, save lead and notify Eli
     if qualified:
-        # Check if already notified
+        # Check if already notified for this conversation
         cursor.execute(
             "SELECT id FROM leads WHERE conversation_id = %s AND notified_at IS NOT NULL",
             (conversation_id,)
@@ -459,15 +454,14 @@ def check_qualification(conversation_id, assistant_message, audit_contexts, curs
         already_notified = cursor.fetchone()
         
         if not already_notified:
-            # FIXED: Removed budget column from INSERT (database doesn't have it yet)
+            # FIXED: Uses qualification_status + notified_at (matches actual schema)
             cursor.execute(
-                """INSERT INTO leads (conversation_id, qualified, notified_at)
+                """INSERT INTO leads (conversation_id, qualification_status, notified_at)
                    VALUES (%s, %s, NOW())
                    RETURNING id""",
-                (conversation_id, True)
+                (conversation_id, 'qualified')
             )
             
-            # Notify Eli
             notify_eli_qualified_lead(conversation_id, lead_data, audit_contexts)
 
 
