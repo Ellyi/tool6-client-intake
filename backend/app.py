@@ -8,6 +8,9 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime
 import uuid
 import requests
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 load_dotenv()
 
@@ -31,7 +34,6 @@ claude_client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
 
 # Load system prompt from file
 def load_system_prompt():
-    """Load system prompt from system_prompt.txt"""
     try:
         with open('system_prompt.txt', 'r', encoding='utf-8') as f:
             return f.read()
@@ -40,19 +42,17 @@ def load_system_prompt():
             with open('../system_prompt.txt', 'r', encoding='utf-8') as f:
                 return f.read()
         except FileNotFoundError:
-            print("⚠️ WARNING: system_prompt.txt not found, using fallback")
+            print("WARNING: system_prompt.txt not found, using fallback")
             return """You are Nuru, the intelligent client intake assistant for LocalOS.
             
 Qualify potential clients by understanding their business context and identifying real problems.
 Be helpful, conversational, and honest. Escalate complex/high-value opportunities to Eli."""
 
-# Load system prompt at startup
 SYSTEM_PROMPT = load_system_prompt()
-print(f"✅ System prompt loaded ({len(SYSTEM_PROMPT)} characters)")
+print(f"System prompt loaded ({len(SYSTEM_PROMPT)} characters)")
 
 # Load context from Tools #3, #4, #5
 def load_audit_context(session_id):
-    """Load audit context from other tools"""
     contexts = {}
     
     try:
@@ -87,11 +87,61 @@ def load_audit_context(session_id):
     
     return contexts
 
-# Escalation webhook to notify Eli
-def notify_eli_qualified_lead(conversation_id, lead_data, audit_contexts):
-    """Send notification to Eli when qualified lead detected"""
+
+# ============================================
+# EMAIL NOTIFICATION VIA SENDGRID
+# ============================================
+
+def send_email_notification(subject, body_text, body_html=None):
+    """Send email via SendGrid API"""
+    sendgrid_api_key = os.getenv('SENDGRID_API_KEY')
+    notify_email = os.getenv('NOTIFY_EMAIL', 'eli@eliombogo.com')
+    
+    if not sendgrid_api_key:
+        print("WARNING: SENDGRID_API_KEY not set - email notification skipped")
+        return False
+    
     try:
-        message = f"""🎯 QUALIFIED LEAD - LocalOS
+        response = requests.post(
+            'https://api.sendgrid.com/v3/mail/send',
+            headers={
+                'Authorization': f'Bearer {sendgrid_api_key}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'personalizations': [{'to': [{'email': notify_email}]}],
+                'from': {'email': 'nuru@eliombogo.com', 'name': 'Nuru - LocalOS'},
+                'subject': subject,
+                'content': [
+                    {'type': 'text/plain', 'value': body_text},
+                    {'type': 'text/html', 'value': body_html or body_text.replace('\n', '<br>')}
+                ]
+            },
+            timeout=10
+        )
+        
+        if response.status_code in [200, 202]:
+            print(f"Email sent to {notify_email}")
+            return True
+        else:
+            print(f"SendGrid error: {response.status_code} - {response.text}")
+            return False
+            
+    except Exception as e:
+        print(f"Email send failed: {e}")
+        return False
+
+
+# ============================================
+# NOTIFY ELI - QUALIFIED LEAD
+# ============================================
+
+def notify_eli_qualified_lead(conversation_id, lead_data, audit_contexts):
+    """Notify Eli via email when qualified lead detected"""
+    try:
+        # Build plain text body
+        body = f"""QUALIFIED LEAD - LocalOS
+{'='*50}
 
 LEAD DETAILS:
 Company: {lead_data.get('company', 'Not provided')}
@@ -99,70 +149,130 @@ Industry: {lead_data.get('industry', 'Not provided')}
 Contact: {lead_data.get('email', 'Not provided')}
 
 QUALIFICATION:
-Budget: {lead_data.get('budget', 'Not stated')}
+Budget: {lead_data.get('budget', 'Stated in conversation')}
 Timeline: {lead_data.get('timeline', 'Not stated')}
 Problem: {lead_data.get('problem', 'See conversation')}
 
 AUDIT DATA:"""
-        
+
         if 'tool3' in audit_contexts:
             ctx = audit_contexts['tool3']
-            message += f"""
-Tool #3 Score: {ctx.get('waste_score')}/100
+            body += f"""
+Tool #3 Waste Score: {ctx.get('waste_score')}/100
 Top Waste Zone: {ctx['top_waste_zones'][0]['name'] if ctx.get('top_waste_zones') else 'N/A'}
 Hours Wasted: {ctx.get('total_hours_wasted')}/month"""
-        
+
         if 'tool4' in audit_contexts:
             ctx = audit_contexts['tool4']
-            message += f"""
+            body += f"""
 Tool #4 Readiness: {ctx.get('readiness_score')}/100"""
-        
+
         if 'tool5' in audit_contexts:
             ctx = audit_contexts['tool5']
-            message += f"""
-Tool #5 ROI: ${ctx.get('annual_savings'):,} annual savings"""
-        
-        message += f"""
+            savings = ctx.get('annual_savings', 0)
+            body += f"""
+Tool #5 ROI: ${savings:,} annual savings"""
+
+        body += f"""
 
 CONVERSATION ID: {conversation_id}
+TIME: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}
 
-ACTION: Reply to contact or review conversation in database.
+ACTION: Reply to contact directly to book discovery call.
+WhatsApp: +254 701 475 000
+Calendly: https://calendly.com/eli-eliombogo/discovery-call
 """
-        
-        webhook_url = "https://script.google.com/macros/s/AKfycbw_DUBZMbh47xMP5Lg83Q04o66oDQFwdO6qM7pixoN4BzVLkR9iz4EiT2WrPU2NTAANlw/exec"
-        
-        requests.post(
-            webhook_url,
-            json={
-                'type': 'qualified_lead',
-                'timestamp': datetime.now().isoformat(),
-                'message': message,
-                'lead_data': lead_data,
-                'conversation_id': conversation_id
-            },
-            timeout=5
+
+        # Build HTML body
+        html = f"""
+<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+  <div style="background: #1a2332; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
+    <h2 style="margin: 0; color: #10b981;">🎯 Qualified Lead - LocalOS</h2>
+    <p style="margin: 5px 0 0; color: #9ca3af; font-size: 14px;">{datetime.now().strftime('%B %d, %Y at %H:%M UTC')}</p>
+  </div>
+  
+  <div style="background: #f9fafb; padding: 20px; border: 1px solid #e5e7eb;">
+    <h3 style="color: #1a2332; border-bottom: 2px solid #10b981; padding-bottom: 8px;">Lead Details</h3>
+    <p><strong>Company:</strong> {lead_data.get('company', 'Not provided')}</p>
+    <p><strong>Industry:</strong> {lead_data.get('industry', 'Not provided')}</p>
+    <p><strong>Contact:</strong> {lead_data.get('email', 'Not provided')}</p>
+    <p><strong>Budget:</strong> {lead_data.get('budget', 'Stated in conversation')}</p>
+    <p><strong>Problem:</strong> {lead_data.get('problem', 'See conversation')}</p>
+  </div>"""
+
+        if audit_contexts:
+            html += """
+  <div style="background: white; padding: 20px; border: 1px solid #e5e7eb; border-top: none;">
+    <h3 style="color: #1a2332; border-bottom: 2px solid #10b981; padding-bottom: 8px;">Audit Data</h3>"""
+            
+            if 'tool3' in audit_contexts:
+                ctx = audit_contexts['tool3']
+                score = ctx.get('waste_score', 0)
+                color = '#ef4444' if score >= 70 else '#f59e0b' if score >= 40 else '#10b981'
+                html += f"""
+    <p><strong>Waste Score:</strong> <span style="color: {color}; font-size: 18px; font-weight: bold;">{score}/100</span></p>
+    <p><strong>Hours Wasted/Month:</strong> {ctx.get('total_hours_wasted', 'N/A')}</p>"""
+            
+            if 'tool5' in audit_contexts:
+                ctx = audit_contexts['tool5']
+                savings = ctx.get('annual_savings', 0)
+                html += f"""
+    <p><strong>Projected Annual Savings:</strong> <span style="color: #10b981; font-weight: bold;">${savings:,}</span></p>"""
+            
+            html += "</div>"
+
+        html += f"""
+  <div style="background: #1a2332; padding: 20px; border-radius: 0 0 8px 8px; text-align: center;">
+    <a href="https://calendly.com/eli-eliombogo/discovery-call" 
+       style="background: #10b981; color: white; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-weight: bold; display: inline-block;">
+      Book Discovery Call
+    </a>
+    <p style="color: #9ca3af; font-size: 12px; margin-top: 12px;">
+      Conversation ID: {conversation_id} | Nuru - LocalOS AI
+    </p>
+  </div>
+</div>"""
+
+        # Send email
+        email_sent = send_email_notification(
+            subject=f"🎯 Qualified Lead - LocalOS | Conversation {conversation_id}",
+            body_text=body,
+            body_html=html
         )
-        
-        print(f"✅ Eli notified of qualified lead (conversation {conversation_id})")
-        
+
+        # Also post to Google Sheets (keep existing webhook as backup)
+        try:
+            webhook_url = "https://script.google.com/macros/s/AKfycbw_DUBZMbh47xMP5Lg83Q04o66oDQFwdO6qM7pixoN4BzVLkR9iz4EiT2WrPU2NTAANlw/exec"
+            requests.post(
+                webhook_url,
+                json={
+                    'type': 'qualified_lead',
+                    'timestamp': datetime.now().isoformat(),
+                    'message': body,
+                    'lead_data': lead_data,
+                    'conversation_id': str(conversation_id)
+                },
+                timeout=5
+            )
+        except:
+            pass
+
+        print(f"Eli notified of qualified lead (conversation {conversation_id}) - Email: {email_sent}")
+
     except Exception as e:
-        print(f"⚠️ Failed to notify Eli: {e}")
+        print(f"Failed to notify Eli: {e}")
 
 
-# Auto-create tables on first run
+# ============================================
+# DATABASE INIT - SAFE (no DROP tables)
+# ============================================
+
 def init_db():
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Drop existing tables if schema is wrong (one-time migration fix)
-        # Remove these DROP lines after first successful deployment
-        cur.execute("DROP TABLE IF EXISTS context_data CASCADE;")
-        cur.execute("DROP TABLE IF EXISTS leads CASCADE;")
-        cur.execute("DROP TABLE IF EXISTS messages CASCADE;")
-        cur.execute("DROP TABLE IF EXISTS conversations CASCADE;")
-        print("🔄 Dropped old tables for schema migration")
-        
+        # SAFE: Only creates if not exists - never drops data
         cur.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
                 id SERIAL PRIMARY KEY,
@@ -216,12 +326,16 @@ def init_db():
         conn.commit()
         cur.close()
         conn.close()
-        print("✅ Database tables ready (full schema)")
+        print("Database tables ready")
     except Exception as e:
         print(f"DB init: {e}")
 
 init_db()
 
+
+# ============================================
+# CHAT ENDPOINT
+# ============================================
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -233,41 +347,33 @@ def chat():
         if not session_id:
             session_id = str(uuid.uuid4())
         
-        # Load audit context from other tools
         audit_contexts = load_audit_context(session_id)
         
-        # Get conversation history
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # Create conversation if new
         cur.execute(
             "INSERT INTO conversations (session_id) VALUES (%s) ON CONFLICT (session_id) DO NOTHING",
             (session_id,)
         )
         
-        # Get conversation_id
         cur.execute("SELECT id FROM conversations WHERE session_id = %s", (session_id,))
         conversation = cur.fetchone()
         conversation_id = conversation['id']
         
-        # Save user message
         cur.execute(
             "INSERT INTO messages (conversation_id, role, content) VALUES (%s, %s, %s)",
             (conversation_id, 'user', user_message)
         )
         
-        # Get conversation history for context
         cur.execute(
             "SELECT role, content FROM messages WHERE conversation_id = %s ORDER BY created_at",
             (conversation_id,)
         )
         history = cur.fetchall()
         
-        # Build messages for Claude
         messages = []
         
-        # If first message AND we have audit context, inject it
         if len(history) == 1 and audit_contexts:
             context_message = "[AUDIT CONTEXT AVAILABLE]\n"
             
@@ -307,7 +413,6 @@ def chat():
                     "content": msg['content']
                 })
         
-        # Call Claude - using Sonnet for cost efficiency
         response = claude_client.messages.create(
             model="claude-sonnet-4-20250514",
             max_tokens=1000,
@@ -317,16 +422,12 @@ def chat():
         
         assistant_message = response.content[0].text
         
-        # Save assistant message
         cur.execute(
             "INSERT INTO messages (conversation_id, role, content) VALUES (%s, %s, %s)",
             (conversation_id, 'assistant', assistant_message)
         )
         
-        # Detect context
         detect_and_save_context(conversation_id, user_message, assistant_message, cur)
-        
-        # Check for qualification triggers
         check_qualification(conversation_id, assistant_message, audit_contexts, cur)
         
         conn.commit()
@@ -342,12 +443,13 @@ def chat():
         return jsonify({'error': str(e)}), 500
 
 
+# ============================================
+# CONTEXT DETECTION
+# ============================================
+
 def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
-    """Detect context signals from conversation - GLOBAL coverage"""
-    
     combined_text = (user_msg + " " + assistant_msg).lower()
     
-    # Location detection
     location = None
     if 'nairobi' in combined_text or 'kenya' in combined_text:
         location = 'Kenya'
@@ -371,10 +473,6 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
         location = 'USA'
     elif 'toronto' in combined_text or 'vancouver' in combined_text or 'canada' in combined_text:
         location = 'Canada'
-    elif 'são paulo' in combined_text or 'rio' in combined_text or 'brazil' in combined_text:
-        location = 'Brazil'
-    elif 'mexico city' in combined_text or 'mexico' in combined_text:
-        location = 'Mexico'
     elif 'london' in combined_text or 'manchester' in combined_text or 'uk' in combined_text or 'united kingdom' in combined_text:
         location = 'UK'
     elif 'berlin' in combined_text or 'munich' in combined_text or 'germany' in combined_text:
@@ -383,8 +481,7 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
         location = 'France'
     elif 'sydney' in combined_text or 'melbourne' in combined_text or 'australia' in combined_text:
         location = 'Australia'
-    
-    # Payment detection
+
     payment = None
     if 'm-pesa' in combined_text or 'mpesa' in combined_text:
         payment = 'M-Pesa'
@@ -402,14 +499,9 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
         payment = 'PIX'
     elif 'gcash' in combined_text:
         payment = 'GCash'
-    elif 'zelle' in combined_text:
-        payment = 'Zelle'
-    elif 'sepa' in combined_text:
-        payment = 'SEPA'
     elif 'bank transfer' in combined_text:
         payment = 'Bank Transfer'
-    
-    # Communication detection
+
     communication = None
     if 'whatsapp' in combined_text:
         communication = 'WhatsApp'
@@ -417,7 +509,7 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
         communication = 'Email'
     elif 'wechat' in combined_text:
         communication = 'WeChat'
-    
+
     if location or payment or communication:
         cursor.execute(
             """INSERT INTO context_data 
@@ -427,9 +519,11 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
         )
 
 
+# ============================================
+# QUALIFICATION CHECK
+# ============================================
+
 def check_qualification(conversation_id, assistant_message, audit_contexts, cursor):
-    """Check if conversation signals qualified lead - notify Eli if yes"""
-    
     qualified = False
     lead_data = {}
     
@@ -444,9 +538,11 @@ def check_qualification(conversation_id, assistant_message, audit_contexts, curs
     
     if 'eli' in msg_lower and ('connect' in msg_lower or 'talk' in msg_lower or 'discuss' in msg_lower):
         qualified = True
+
+    if 'ready to' in msg_lower or 'let\'s start' in msg_lower or 'move forward' in msg_lower:
+        qualified = True
     
     if qualified:
-        # Check if already notified for this conversation
         cursor.execute(
             "SELECT id FROM leads WHERE conversation_id = %s AND notified_at IS NOT NULL",
             (conversation_id,)
@@ -454,7 +550,6 @@ def check_qualification(conversation_id, assistant_message, audit_contexts, curs
         already_notified = cursor.fetchone()
         
         if not already_notified:
-            # FIXED: Uses qualification_status + notified_at (matches actual schema)
             cursor.execute(
                 """INSERT INTO leads (conversation_id, qualification_status, notified_at)
                    VALUES (%s, %s, NOW())
@@ -465,9 +560,13 @@ def check_qualification(conversation_id, assistant_message, audit_contexts, curs
             notify_eli_qualified_lead(conversation_id, lead_data, audit_contexts)
 
 
+# ============================================
+# HEALTH CHECK
+# ============================================
+
 @app.route('/api/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'healthy'})
+    return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
 
 if __name__ == '__main__':
