@@ -110,7 +110,7 @@ def send_email_notification(subject, body_text, body_html=None):
             },
             json={
                 'personalizations': [{'to': [{'email': notify_email}]}],
-                'from': {'email': 'elytsend@gmail.com', 'name': 'Nuru - LocalOS'},
+                'from': {'email': 'nuru@eliombogo.com', 'name': 'Nuru - LocalOS'},
                 'subject': subject,
                 'content': [
                     {'type': 'text/plain', 'value': body_text},
@@ -428,7 +428,7 @@ def chat():
         )
         
         detect_and_save_context(conversation_id, user_message, assistant_message, cur)
-        check_qualification(conversation_id, assistant_message, audit_contexts, cur)
+        check_qualification(conversation_id, assistant_message, user_message, audit_contexts, cur)
         
         conn.commit()
         cur.close()
@@ -523,23 +523,25 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
 # QUALIFICATION CHECK
 # ============================================
 
-def check_qualification(conversation_id, assistant_message, audit_contexts, cursor):
+def check_qualification(conversation_id, assistant_message, user_message, audit_contexts, cursor):
     qualified = False
     lead_data = {}
     
     msg_lower = assistant_message.lower()
-    
-    if '$' in assistant_message or 'budget' in msg_lower:
+    user_lower = (user_message or '').lower()
+    combined = msg_lower + ' ' + user_lower
+
+    if '$' in combined or 'budget' in combined:
         qualified = True
         lead_data['budget'] = 'Stated in conversation'
-    
-    if 'book' in msg_lower and 'call' in msg_lower:
-        qualified = True
-    
-    if 'eli' in msg_lower and ('connect' in msg_lower or 'talk' in msg_lower or 'discuss' in msg_lower):
+
+    if 'book' in combined and 'call' in combined:
         qualified = True
 
-    if 'ready to' in msg_lower or 'let\'s start' in msg_lower or 'move forward' in msg_lower:
+    if 'eli' in combined and ('connect' in combined or 'talk' in combined or 'discuss' in combined):
+        qualified = True
+
+    if 'ready to' in combined or "let's start" in combined or 'move forward' in combined:
         qualified = True
     
     if qualified:
