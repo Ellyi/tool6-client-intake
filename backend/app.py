@@ -11,7 +11,9 @@ import requests
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-load_dotenv()from utils.model_router import get_model
+
+load_dotenv()
+from utils.model_router import get_model
 
 app = Flask(__name__)
 CORS(app)
@@ -88,46 +90,45 @@ def load_audit_context(session_id):
 
 
 # ============================================
-# EMAIL NOTIFICATION VIA SENDGRID
+# EMAIL NOTIFICATION VIA GMAIL SMTP
 # ============================================
 
 def send_email_notification(subject, body_text, body_html=None):
-    """Send email via SendGrid API"""
-    sendgrid_api_key = os.getenv('SENDGRID_API_KEY')
+    """Send email via Gmail SMTP (replaced SendGrid)"""
+    gmail_user = os.getenv('GMAIL_USER')  # elytsend@gmail.com
+    gmail_password = os.getenv('GMAIL_APP_PASSWORD')  # 16-char app password
     notify_email = os.getenv('NOTIFY_EMAIL', 'eli@eliombogo.com')
     
-    if not sendgrid_api_key:
-        print("WARNING: SENDGRID_API_KEY not set - email notification skipped")
+    if not gmail_user or not gmail_password:
+        print("WARNING: Gmail credentials not set - email notification skipped")
         return False
     
     try:
-        response = requests.post(
-            'https://api.sendgrid.com/v3/mail/send',
-            headers={
-                'Authorization': f'Bearer {sendgrid_api_key}',
-                'Content-Type': 'application/json'
-            },
-            json={
-                'personalizations': [{'to': [{'email': notify_email}]}],
-                'from': {'email': 'elytsend@gmail.com', 'name': 'Nuru - LocalOS'},
-                'subject': subject,
-                'content': [
-                    {'type': 'text/plain', 'value': body_text},
-                    {'type': 'text/html', 'value': body_html or body_text.replace('\n', '<br>')}
-                ]
-            },
-            timeout=10
-        )
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = subject
+        msg['From'] = gmail_user
+        msg['To'] = notify_email
         
-        if response.status_code in [200, 202]:
-            print(f"Email sent to {notify_email}")
-            return True
-        else:
-            print(f"SendGrid error: {response.status_code} - {response.text}")
-            return False
+        # Attach text and HTML parts
+        text_part = MIMEText(body_text, 'plain')
+        msg.attach(text_part)
+        
+        if body_html:
+            html_part = MIMEText(body_html, 'html')
+            msg.attach(html_part)
+        
+        # Send via Gmail SMTP
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(gmail_user, gmail_password)
+            server.send_message(msg)
+        
+        print(f"✅ Email sent to {notify_email} via Gmail SMTP")
+        return True
             
     except Exception as e:
-        print(f"Email send failed: {e}")
+        print(f"❌ Email send failed: {e}")
         return False
 
 
@@ -232,7 +233,7 @@ Calendly: https://calendly.com/eli-eliombogo/discovery-call
   </div>
 </div>"""
 
-        # Send email
+        # Send email via Gmail SMTP
         email_sent = send_email_notification(
             subject=f"🎯 Qualified Lead - LocalOS | Conversation {conversation_id}",
             body_text=body,
@@ -240,9 +241,10 @@ Calendly: https://calendly.com/eli-eliombogo/discovery-call
         )
 
         # Also post to Google Sheets (keep existing webhook as backup)
+        webhook_sent = False
         try:
             webhook_url = "https://script.google.com/macros/s/AKfycbw_DUBZMbh47xMP5Lg83Q04o66oDQFwdO6qM7pixoN4BzVLkR9iz4EiT2WrPU2NTAANlw/exec"
-            requests.post(
+            webhook_response = requests.post(
                 webhook_url,
                 json={
                     'type': 'qualified_lead',
@@ -253,10 +255,11 @@ Calendly: https://calendly.com/eli-eliombogo/discovery-call
                 },
                 timeout=5
             )
-        except:
-            pass
+            webhook_sent = webhook_response.status_code == 200
+        except Exception as webhook_error:
+            print(f"Webhook failed: {webhook_error}")
 
-        print(f"Eli notified of qualified lead (conversation {conversation_id}) - Email: {email_sent}")
+        print(f"Eli notified of qualified lead (conversation {conversation_id}) - Email: {email_sent}, Webhook: {webhook_sent}")
 
     except Exception as e:
         print(f"Failed to notify Eli: {e}")
