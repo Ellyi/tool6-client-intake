@@ -11,8 +11,7 @@ import requests
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-
-load_dotenv()
+load_dotenv()from utils.model_router import get_model
 
 app = Flask(__name__)
 CORS(app)
@@ -414,7 +413,7 @@ def chat():
                 })
         
         response = claude_client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model=get_model("nuru_chat"),
             max_tokens=1000,
             system=SYSTEM_PROMPT,
             messages=messages
