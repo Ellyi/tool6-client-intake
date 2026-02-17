@@ -110,7 +110,7 @@ def send_email_notification(subject, body_text, body_html=None):
             },
             json={
                 'personalizations': [{'to': [{'email': notify_email}]}],
-                'from': {'email': 'nuru@eliombogo.com', 'name': 'Nuru - LocalOS'},
+                'from': {'email': 'elytsend@gmail.com', 'name': 'Nuru - LocalOS'},
                 'subject': subject,
                 'content': [
                     {'type': 'text/plain', 'value': body_text},
