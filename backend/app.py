@@ -8,9 +8,6 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime
 import uuid
 import requests
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 
 load_dotenv()
 from utils.model_router import get_model
@@ -90,41 +87,43 @@ def load_audit_context(session_id):
 
 
 # ============================================
-# EMAIL NOTIFICATION VIA GMAIL SMTP
+# EMAIL NOTIFICATION VIA RESEND API
 # ============================================
 
 def send_email_notification(subject, body_text, body_html=None):
-    """Send email via Gmail SMTP (replaced SendGrid)"""
-    gmail_user = os.getenv('GMAIL_USER')  # elytsend@gmail.com
-    gmail_password = os.getenv('GMAIL_APP_PASSWORD')  # 16-char app password
+    """Send email via Resend API (HTTPS - works on Railway)"""
+    resend_api_key = os.getenv('RESEND_API_KEY')
     notify_email = os.getenv('NOTIFY_EMAIL', 'eli@eliombogo.com')
+    from_email = os.getenv('FROM_EMAIL', 'nuru@eliombogo.com')
     
-    if not gmail_user or not gmail_password:
-        print("WARNING: Gmail credentials not set - email notification skipped")
+    if not resend_api_key:
+        print("WARNING: RESEND_API_KEY not set - email notification skipped")
         return False
     
     try:
-        # Create message
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = subject
-        msg['From'] = gmail_user
-        msg['To'] = notify_email
+        response = requests.post(
+            'https://api.resend.com/emails',
+            headers={
+                'Authorization': f'Bearer {resend_api_key}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'from': from_email,
+                'to': [notify_email],
+                'subject': subject,
+                'html': body_html if body_html else body_text.replace('\n', '<br>'),
+                'text': body_text
+            },
+            timeout=10
+        )
         
-        # Attach text and HTML parts
-        text_part = MIMEText(body_text, 'plain')
-        msg.attach(text_part)
-        
-        if body_html:
-            html_part = MIMEText(body_html, 'html')
-            msg.attach(html_part)
-        
-        # Send via Gmail SMTP using SSL port 465 (Railway blocks port 587)
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(gmail_user, gmail_password)
-            server.send_message(msg)
-        
-        print(f"✅ Email sent to {notify_email} via Gmail SMTP")
-        return True
+        if response.status_code in [200, 201]:
+            response_data = response.json()
+            print(f"✅ Email sent via Resend to {notify_email} - ID: {response_data.get('id', 'unknown')}")
+            return True
+        else:
+            print(f"❌ Resend API error: {response.status_code} - {response.text}")
+            return False
             
     except Exception as e:
         print(f"❌ Email send failed: {e}")
@@ -578,71 +577,90 @@ def health():
 
 @app.route('/api/test-email', methods=['GET'])
 def test_email():
-    """Test endpoint to verify Gmail SMTP works - hit this URL to send test email"""
+    """Test endpoint to verify Resend API works - hit this URL to send test email"""
     try:
-        print("🧪 TEST EMAIL - Attempting to send...")
+        print("🧪 TEST EMAIL - Attempting to send via Resend...")
         
-        gmail_user = os.getenv('GMAIL_USER')
-        gmail_password = os.getenv('GMAIL_APP_PASSWORD')
+        resend_api_key = os.getenv('RESEND_API_KEY')
         notify_email = os.getenv('NOTIFY_EMAIL', 'eli@eliombogo.com')
+        from_email = os.getenv('FROM_EMAIL', 'nuru@eliombogo.com')
         
-        print(f"Gmail User: {gmail_user}")
+        print(f"Resend API Key Set: {'Yes' if resend_api_key else 'No'}")
+        print(f"From Email: {from_email}")
         print(f"Notify Email: {notify_email}")
-        print(f"Gmail Password Set: {'Yes' if gmail_password else 'No'}")
         
-        if not gmail_user or not gmail_password:
+        if not resend_api_key:
             return jsonify({
                 'success': False,
-                'error': 'Gmail credentials not configured',
-                'gmail_user': gmail_user,
-                'has_password': bool(gmail_password)
+                'error': 'RESEND_API_KEY not configured',
+                'has_api_key': False
             }), 500
         
-        # Create test message
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = '🧪 TEST EMAIL - LocalOS Nuru'
-        msg['From'] = gmail_user
-        msg['To'] = notify_email
+        # Test Resend API
+        print("📧 Sending via Resend API...")
         
-        body = f"""
-This is a test email from Nuru backend.
+        response = requests.post(
+            'https://api.resend.com/emails',
+            headers={
+                'Authorization': f'Bearer {resend_api_key}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'from': from_email,
+                'to': [notify_email],
+                'subject': '🧪 TEST EMAIL - LocalOS Nuru',
+                'html': f"""
+                <div style="font-family: Arial, sans-serif;">
+                    <h2 style="color: #10b981;">✅ Resend API Test Successful</h2>
+                    <p>This is a test email from Nuru backend via Resend.</p>
+                    <p><strong>Time:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
+                    <p><strong>Backend:</strong> Railway tool6-client-intake-production</p>
+                    <p><strong>From:</strong> {from_email}</p>
+                    <p><strong>To:</strong> {notify_email}</p>
+                    <p style="color: #10b981; font-weight: bold;">If you receive this, Resend is working correctly!</p>
+                </div>
+                """,
+                'text': f"""
+✅ Resend API Test Successful
 
 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
 Backend: Railway tool6-client-intake-production
-Gmail User: {gmail_user}
-Recipient: {notify_email}
+From: {from_email}
+To: {notify_email}
 
-If you receive this, Gmail SMTP is working correctly.
-"""
+If you receive this, Resend is working correctly!
+                """
+            },
+            timeout=10
+        )
         
-        text_part = MIMEText(body, 'plain')
-        msg.attach(text_part)
-        
-        print("📧 Connecting to Gmail SMTP (port 465 SSL)...")
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            print("🔑 Logging in...")
-            server.login(gmail_user, gmail_password)
+        if response.status_code in [200, 201]:
+            response_data = response.json()
+            print(f"✅ TEST EMAIL SENT via Resend - ID: {response_data.get('id')}")
             
-            print("📤 Sending message...")
-            server.send_message(msg)
+            return jsonify({
+                'success': True,
+                'message': f'Test email sent to {notify_email}',
+                'from_email': from_email,
+                'email_id': response_data.get('id'),
+                'timestamp': datetime.now().isoformat()
+            }), 200
+        else:
+            print(f"❌ Resend API Error: {response.status_code} - {response.text}")
+            return jsonify({
+                'success': False,
+                'error': 'Resend API request failed',
+                'status_code': response.status_code,
+                'details': response.text
+            }), response.status_code
         
-        print(f"✅ TEST EMAIL SENT to {notify_email}")
-        
-        return jsonify({
-            'success': True,
-            'message': f'Test email sent to {notify_email}',
-            'gmail_user': gmail_user,
-            'timestamp': datetime.now().isoformat()
-        }), 200
-        
-    except smtplib.SMTPAuthenticationError as e:
-        print(f"❌ Gmail Authentication Failed: {e}")
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Resend API request failed: {e}")
         return jsonify({
             'success': False,
-            'error': 'Gmail authentication failed',
-            'details': str(e),
-            'hint': 'Check GMAIL_APP_PASSWORD is correct 16-char app password'
-        }), 401
+            'error': 'Network error calling Resend API',
+            'details': str(e)
+        }), 500
         
     except Exception as e:
         print(f"❌ Email Test Failed: {e}")
