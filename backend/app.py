@@ -573,5 +573,88 @@ def health():
     return jsonify({'status': 'healthy', 'timestamp': datetime.now().isoformat()})
 
 
+# ============================================
+# TEST EMAIL ENDPOINT (FOR DEBUGGING)
+# ============================================
+
+@app.route('/api/test-email', methods=['GET'])
+def test_email():
+    """Test endpoint to verify Gmail SMTP works - hit this URL to send test email"""
+    try:
+        print("🧪 TEST EMAIL - Attempting to send...")
+        
+        gmail_user = os.getenv('GMAIL_USER')
+        gmail_password = os.getenv('GMAIL_APP_PASSWORD')
+        notify_email = os.getenv('NOTIFY_EMAIL', 'eli@eliombogo.com')
+        
+        print(f"Gmail User: {gmail_user}")
+        print(f"Notify Email: {notify_email}")
+        print(f"Gmail Password Set: {'Yes' if gmail_password else 'No'}")
+        
+        if not gmail_user or not gmail_password:
+            return jsonify({
+                'success': False,
+                'error': 'Gmail credentials not configured',
+                'gmail_user': gmail_user,
+                'has_password': bool(gmail_password)
+            }), 500
+        
+        # Create test message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = '🧪 TEST EMAIL - LocalOS Nuru'
+        msg['From'] = gmail_user
+        msg['To'] = notify_email
+        
+        body = f"""
+This is a test email from Nuru backend.
+
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
+Backend: Railway tool6-client-intake-production
+Gmail User: {gmail_user}
+Recipient: {notify_email}
+
+If you receive this, Gmail SMTP is working correctly.
+"""
+        
+        text_part = MIMEText(body, 'plain')
+        msg.attach(text_part)
+        
+        print("📧 Connecting to Gmail SMTP...")
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            print("🔐 Starting TLS...")
+            server.starttls()
+            
+            print("🔑 Logging in...")
+            server.login(gmail_user, gmail_password)
+            
+            print("📤 Sending message...")
+            server.send_message(msg)
+        
+        print(f"✅ TEST EMAIL SENT to {notify_email}")
+        
+        return jsonify({
+            'success': True,
+            'message': f'Test email sent to {notify_email}',
+            'gmail_user': gmail_user,
+            'timestamp': datetime.now().isoformat()
+        }), 200
+        
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"❌ Gmail Authentication Failed: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Gmail authentication failed',
+            'details': str(e),
+            'hint': 'Check GMAIL_APP_PASSWORD is correct 16-char app password'
+        }), 401
+        
+    except Exception as e:
+        print(f"❌ Email Test Failed: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
