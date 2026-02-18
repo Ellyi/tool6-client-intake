@@ -118,9 +118,8 @@ def send_email_notification(subject, body_text, body_html=None):
             html_part = MIMEText(body_html, 'html')
             msg.attach(html_part)
         
-        # Send via Gmail SMTP
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            server.starttls()
+        # Send via Gmail SMTP using SSL port 465 (Railway blocks port 587)
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(gmail_user, gmail_password)
             server.send_message(msg)
         
@@ -619,11 +618,8 @@ If you receive this, Gmail SMTP is working correctly.
         text_part = MIMEText(body, 'plain')
         msg.attach(text_part)
         
-        print("📧 Connecting to Gmail SMTP...")
-        with smtplib.SMTP('smtp.gmail.com', 587) as server:
-            print("🔐 Starting TLS...")
-            server.starttls()
-            
+        print("📧 Connecting to Gmail SMTP (port 465 SSL)...")
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             print("🔑 Logging in...")
             server.login(gmail_user, gmail_password)
             
