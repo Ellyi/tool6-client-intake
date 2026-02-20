@@ -8,6 +8,7 @@ from psycopg2.extras import RealDictCursor
 from datetime import datetime
 import uuid
 import requests
+import re
 
 load_dotenv()
 from utils.model_router import get_model
@@ -131,23 +132,114 @@ def send_email_notification(subject, body_text, body_html=None):
 
 
 # ============================================
+# EXTRACT LEAD DATA FROM CONVERSATION HISTORY
+# Issue 5 fix: read actual messages before building lead_data
+# ============================================
+
+def extract_lead_data_from_history(conversation_id, cursor):
+    """
+    Parse full conversation history to extract company, industry,
+    email, budget, and problem before sending escalation email.
+    Returns populated lead_data dict instead of empty placeholders.
+    """
+    cursor.execute(
+        "SELECT role, content FROM messages WHERE conversation_id = %s ORDER BY created_at",
+        (conversation_id,)
+    )
+    messages = cursor.fetchall()
+    
+    # Concatenate all user messages for extraction
+    user_text = ' '.join([m['content'] for m in messages if m['role'] == 'user'])
+    all_text = ' '.join([m['content'] for m in messages])
+    
+    lead_data = {}
+
+    # Extract email
+    email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', user_text)
+    if email_match:
+        lead_data['email'] = email_match.group(0)
+
+    # Extract phone (international formats)
+    phone_match = re.search(r'(\+?\d[\d\s\-().]{7,}\d)', user_text)
+    if phone_match:
+        lead_data['phone'] = phone_match.group(0).strip()
+
+    # Extract budget (any $ amount or budget mention with number)
+    budget_match = re.search(r'\$[\d,]+[kK]?|\b(\d+[kK])\s*(budget|dollars?|USD)|\bbudget\s*(of|is|around|about)?\s*\$?[\d,]+[kK]?', user_text, re.IGNORECASE)
+    if budget_match:
+        lead_data['budget'] = budget_match.group(0).strip()
+    
+    # Extract company name - look for patterns like "my company is X", "we're at X", "I work at X"
+    company_patterns = [
+        r"(?:my company|our company|company name|we(?:'re| are) (?:at |called |named )?|i work (?:at|for) |business (?:is |called )?)([\w\s&.,'-]{2,40}?)(?:\.|,|\s+and|\s+we|\s+our|\s+i |$)",
+        r"(?:at|for|from)\s+([A-Z][a-zA-Z\s&.,'-]{2,30}?)(?:\s+(?:and|we|our|i )|[.,]|$)"
+    ]
+    for pattern in company_patterns:
+        match = re.search(pattern, user_text, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip().rstrip('.,')
+            if len(candidate) > 2 and candidate.lower() not in ['the', 'and', 'but', 'that', 'this']:
+                lead_data['company'] = candidate
+                break
+
+    # Extract industry from common keywords
+    industry_keywords = {
+        'logistics': 'Logistics', 'transport': 'Transport', 'shipping': 'Logistics',
+        'healthcare': 'Healthcare', 'hospital': 'Healthcare', 'clinic': 'Healthcare',
+        'finance': 'Finance', 'fintech': 'Fintech', 'banking': 'Finance',
+        'retail': 'Retail', 'ecommerce': 'E-commerce', 'e-commerce': 'E-commerce',
+        'saas': 'SaaS', 'software': 'Software', 'tech': 'Technology',
+        'manufacturing': 'Manufacturing', 'factory': 'Manufacturing',
+        'real estate': 'Real Estate', 'property': 'Real Estate',
+        'education': 'Education', 'school': 'Education',
+        'restaurant': 'Food & Beverage', 'food': 'Food & Beverage',
+        'consulting': 'Consulting', 'agency': 'Agency',
+        'agriculture': 'Agriculture', 'farming': 'Agriculture',
+    }
+    lower_text = all_text.lower()
+    for keyword, industry in industry_keywords.items():
+        if keyword in lower_text:
+            lead_data['industry'] = industry
+            break
+
+    # Extract problem summary — first user message is usually the clearest statement
+    user_messages = [m['content'] for m in messages if m['role'] == 'user']
+    if user_messages:
+        # Use first substantive user message (>20 chars) as problem description
+        for msg in user_messages:
+            if len(msg) > 20:
+                lead_data['problem'] = msg[:300] + ('...' if len(msg) > 300 else '')
+                break
+
+    # Extract timeline signals
+    timeline_patterns = ['this week', 'this month', 'next month', 'asap', 'urgent',
+                        'q1', 'q2', 'q3', 'q4', '2 weeks', '1 month', '3 months', '6 months']
+    for pattern in timeline_patterns:
+        if pattern in lower_text:
+            lead_data['timeline'] = pattern
+            break
+
+    return lead_data
+
+
+# ============================================
 # NOTIFY ELI - QUALIFIED LEAD
 # ============================================
 
 def notify_eli_qualified_lead(conversation_id, lead_data, audit_contexts):
     """Notify Eli via email when qualified lead detected"""
     try:
-        # Build plain text body
         body = f"""QUALIFIED LEAD - LocalOS
 {'='*50}
 
 LEAD DETAILS:
-Company: {lead_data.get('company', 'Not provided')}
-Industry: {lead_data.get('industry', 'Not provided')}
-Contact: {lead_data.get('email', 'Not provided')}
+Company: {lead_data.get('company', 'Not captured yet')}
+Industry: {lead_data.get('industry', 'Not captured yet')}
+Contact: {lead_data.get('email', 'Not captured yet')}
+Phone: {lead_data.get('phone', 'Not captured yet')}
 
 QUALIFICATION:
-Budget: {lead_data.get('budget', 'Stated in conversation')}
+Budget: {lead_data.get('budget', 'Mentioned in conversation')}
 Timeline: {lead_data.get('timeline', 'Not stated')}
 Problem: {lead_data.get('problem', 'See conversation')}
 
@@ -181,7 +273,6 @@ WhatsApp: +254 701 475 000
 Calendly: https://calendly.com/eli-eliombogo/discovery-call
 """
 
-        # Build HTML body
         html = f"""
 <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
   <div style="background: #1a2332; color: white; padding: 20px; border-radius: 8px 8px 0 0;">
@@ -191,10 +282,12 @@ Calendly: https://calendly.com/eli-eliombogo/discovery-call
   
   <div style="background: #f9fafb; padding: 20px; border: 1px solid #e5e7eb;">
     <h3 style="color: #1a2332; border-bottom: 2px solid #10b981; padding-bottom: 8px;">Lead Details</h3>
-    <p><strong>Company:</strong> {lead_data.get('company', 'Not provided')}</p>
-    <p><strong>Industry:</strong> {lead_data.get('industry', 'Not provided')}</p>
-    <p><strong>Contact:</strong> {lead_data.get('email', 'Not provided')}</p>
-    <p><strong>Budget:</strong> {lead_data.get('budget', 'Stated in conversation')}</p>
+    <p><strong>Company:</strong> {lead_data.get('company', 'Not captured yet')}</p>
+    <p><strong>Industry:</strong> {lead_data.get('industry', 'Not captured yet')}</p>
+    <p><strong>Contact:</strong> {lead_data.get('email', 'Not captured yet')}</p>
+    <p><strong>Phone:</strong> {lead_data.get('phone', 'Not captured yet')}</p>
+    <p><strong>Budget:</strong> {lead_data.get('budget', 'Mentioned in conversation')}</p>
+    <p><strong>Timeline:</strong> {lead_data.get('timeline', 'Not stated')}</p>
     <p><strong>Problem:</strong> {lead_data.get('problem', 'See conversation')}</p>
   </div>"""
 
@@ -231,14 +324,12 @@ Calendly: https://calendly.com/eli-eliombogo/discovery-call
   </div>
 </div>"""
 
-        # Send email via Gmail SMTP
         email_sent = send_email_notification(
             subject=f"🎯 Qualified Lead - LocalOS | Conversation {conversation_id}",
             body_text=body,
             body_html=html
         )
 
-        # Also post to Google Sheets (keep existing webhook as backup)
         webhook_sent = False
         try:
             webhook_url = "https://script.google.com/macros/s/AKfycbw_DUBZMbh47xMP5Lg83Q04o66oDQFwdO6qM7pixoN4BzVLkR9iz4EiT2WrPU2NTAANlw/exec"
@@ -272,7 +363,6 @@ def init_db():
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # SAFE: Only creates if not exists - never drops data
         cur.execute("""
             CREATE TABLE IF NOT EXISTS conversations (
                 id SERIAL PRIMARY KEY,
@@ -521,19 +611,18 @@ def detect_and_save_context(conversation_id, user_msg, assistant_msg, cursor):
 
 # ============================================
 # QUALIFICATION CHECK
+# Issue 5 fix: extract lead data from history before escalating
 # ============================================
 
 def check_qualification(conversation_id, assistant_message, user_message, audit_contexts, cursor):
     qualified = False
-    lead_data = {}
-    
+
     msg_lower = assistant_message.lower()
     user_lower = (user_message or '').lower()
     combined = msg_lower + ' ' + user_lower
 
     if '$' in combined or 'budget' in combined:
         qualified = True
-        lead_data['budget'] = 'Stated in conversation'
 
     if 'book' in combined and 'call' in combined:
         qualified = True
@@ -543,23 +632,80 @@ def check_qualification(conversation_id, assistant_message, user_message, audit_
 
     if 'ready to' in combined or "let's start" in combined or 'move forward' in combined:
         qualified = True
-    
+
     if qualified:
         cursor.execute(
             "SELECT id FROM leads WHERE conversation_id = %s AND notified_at IS NOT NULL",
             (conversation_id,)
         )
         already_notified = cursor.fetchone()
-        
+
         if not already_notified:
+            # FIX: Extract real lead data from conversation history before escalating
+            # Previously: lead_data was always empty {}, so email showed "Not provided" for everything
+            lead_data = extract_lead_data_from_history(conversation_id, cursor)
+
+            # Also pull company/industry from audit context if not found in conversation
+            if not lead_data.get('company') and 'tool3' in audit_contexts:
+                lead_data['company'] = audit_contexts['tool3'].get('company_name', '')
+            if not lead_data.get('industry') and 'tool3' in audit_contexts:
+                lead_data['industry'] = audit_contexts['tool3'].get('industry', '')
+
             cursor.execute(
                 """INSERT INTO leads (conversation_id, qualification_status, notified_at)
                    VALUES (%s, %s, NOW())
                    RETURNING id""",
                 (conversation_id, 'qualified')
             )
-            
+
             notify_eli_qualified_lead(conversation_id, lead_data, audit_contexts)
+
+
+# ============================================
+# ADMIN STATS ENDPOINT
+# Issue 4 fix: was hardcoded to 0 in admin dashboard
+# ============================================
+
+@app.route('/api/stats', methods=['GET'])
+def stats():
+    """Admin stats endpoint - returns Nuru conversation and lead counts"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("SELECT COUNT(*) as total FROM conversations")
+        total_conversations = cur.fetchone()['total']
+
+        cur.execute("""
+            SELECT COUNT(*) as total FROM conversations
+            WHERE created_at >= CURRENT_DATE
+        """)
+        conversations_today = cur.fetchone()['total']
+
+        cur.execute("""
+            SELECT COUNT(*) as total FROM leads
+            WHERE qualification_status = 'qualified'
+        """)
+        qualified_leads = cur.fetchone()['total']
+
+        cur.execute("SELECT COUNT(*) as total FROM messages")
+        total_messages = cur.fetchone()['total']
+
+        avg_messages = round(total_messages / total_conversations, 1) if total_conversations > 0 else 0
+
+        cur.close()
+        conn.close()
+
+        return jsonify({
+            'total_conversations': total_conversations,
+            'conversations_today': conversations_today,
+            'qualified_leads': qualified_leads,
+            'total_messages': total_messages,
+            'avg_messages_per_conversation': avg_messages
+        })
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 # ============================================
@@ -577,7 +723,7 @@ def health():
 
 @app.route('/api/test-email', methods=['GET'])
 def test_email():
-    """Test endpoint to verify Resend API works - hit this URL to send test email"""
+    """Test endpoint to verify Resend API works"""
     try:
         print("🧪 TEST EMAIL - Attempting to send via Resend...")
         
@@ -585,19 +731,12 @@ def test_email():
         notify_email = os.getenv('NOTIFY_EMAIL', 'eli@eliombogo.com')
         from_email = os.getenv('FROM_EMAIL', 'nuru@eliombogo.com')
         
-        print(f"Resend API Key Set: {'Yes' if resend_api_key else 'No'}")
-        print(f"From Email: {from_email}")
-        print(f"Notify Email: {notify_email}")
-        
         if not resend_api_key:
             return jsonify({
                 'success': False,
                 'error': 'RESEND_API_KEY not configured',
                 'has_api_key': False
             }), 500
-        
-        # Test Resend API
-        print("📧 Sending via Resend API...")
         
         response = requests.post(
             'https://api.resend.com/emails',
@@ -620,33 +759,20 @@ def test_email():
                     <p style="color: #10b981; font-weight: bold;">If you receive this, Resend is working correctly!</p>
                 </div>
                 """,
-                'text': f"""
-✅ Resend API Test Successful
-
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
-Backend: Railway tool6-client-intake-production
-From: {from_email}
-To: {notify_email}
-
-If you receive this, Resend is working correctly!
-                """
+                'text': f"✅ Resend API Test\nTime: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\nFrom: {from_email}\nTo: {notify_email}"
             },
             timeout=10
         )
         
         if response.status_code in [200, 201]:
             response_data = response.json()
-            print(f"✅ TEST EMAIL SENT via Resend - ID: {response_data.get('id')}")
-            
             return jsonify({
                 'success': True,
                 'message': f'Test email sent to {notify_email}',
-                'from_email': from_email,
                 'email_id': response_data.get('id'),
                 'timestamp': datetime.now().isoformat()
             }), 200
         else:
-            print(f"❌ Resend API Error: {response.status_code} - {response.text}")
             return jsonify({
                 'success': False,
                 'error': 'Resend API request failed',
@@ -654,20 +780,8 @@ If you receive this, Resend is working correctly!
                 'details': response.text
             }), response.status_code
         
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Resend API request failed: {e}")
-        return jsonify({
-            'success': False,
-            'error': 'Network error calling Resend API',
-            'details': str(e)
-        }), 500
-        
     except Exception as e:
-        print(f"❌ Email Test Failed: {e}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
+        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
