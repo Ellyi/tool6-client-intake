@@ -13,7 +13,7 @@ load_dotenv()
 from utils.model_router import get_model
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["https://eliombogo.com", "https://www.eliombogo.com"])
 
 # Database connection
 def get_db_connection():
