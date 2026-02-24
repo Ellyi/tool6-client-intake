@@ -9,6 +9,7 @@ from datetime import datetime
 import uuid
 import requests
 import re
+from urllib.parse import quote  # NEW: for CallMeBot URL encoding
 
 load_dotenv()
 from utils.model_router import get_model
@@ -88,6 +89,47 @@ def load_audit_context(session_id):
 
 
 # ============================================
+# WHATSAPP NOTIFICATION VIA CALLMEBOT (FREE)
+# NEW: Zero-cost WhatsApp alerts to Eli
+# ============================================
+#
+# ONE-TIME SETUP (do this before deploying):
+# 1. Save +34 644 59 72 10 in your contacts as "CallMeBot"
+# 2. Send this exact message to that number on WhatsApp:
+#    I allow callmebot to send me messages
+# 3. You'll receive your API key back via WhatsApp within seconds
+# 4. Add to Railway env vars:
+#    CALLMEBOT_API_KEY = <key you received>
+#    WHATSAPP_PHONE = 254701475000  (no + sign)
+# ============================================
+
+def send_whatsapp_notification(message):
+    """Send WhatsApp message to Eli via CallMeBot free API."""
+    api_key = os.getenv('CALLMEBOT_API_KEY')
+    phone = os.getenv('WHATSAPP_PHONE', '254701475000')
+
+    if not api_key:
+        print("WARNING: CALLMEBOT_API_KEY not set — WhatsApp notification skipped")
+        return False
+
+    try:
+        encoded_message = quote(message)
+        url = f"https://api.callmebot.com/whatsapp.php?phone={phone}&text={encoded_message}&apikey={api_key}"
+        response = requests.get(url, timeout=10)
+
+        if response.status_code == 200:
+            print(f"✅ WhatsApp sent to +{phone} via CallMeBot")
+            return True
+        else:
+            print(f"❌ CallMeBot error: {response.status_code} - {response.text}")
+            return False
+
+    except Exception as e:
+        print(f"❌ WhatsApp send failed: {e}")
+        return False
+
+
+# ============================================
 # EMAIL NOTIFICATION VIA RESEND API
 # ============================================
 
@@ -132,6 +174,209 @@ def send_email_notification(subject, body_text, body_html=None):
 
 
 # ============================================
+# TOOL COMPLETION EMAIL — ISSUE 1 FIX
+# NEW: Send user their results + CTA after Tool #3/4/5
+# ============================================
+
+def send_tool_completion_email(user_email, tool_number, result_data):
+    """
+    Send user their audit results via email immediately after
+    completing Tool #3, #4, or #5 and submitting their email.
+    Previously: user got nothing after tool completion.
+    Now: they get results summary + deep-link back to Nuru.
+    """
+    resend_api_key = os.getenv('RESEND_API_KEY')
+    from_email = os.getenv('FROM_EMAIL', 'nuru@eliombogo.com')
+
+    if not resend_api_key:
+        print("WARNING: RESEND_API_KEY not set — tool completion email skipped")
+        return False
+
+    if not user_email:
+        print("WARNING: No user email — tool completion email skipped")
+        return False
+
+    # Build tool-specific subject, headline, and summary
+    if tool_number == 3:
+        subject = f"Your Intelligence Waste Audit Results — Score: {result_data.get('waste_score', 0)}/100"
+        headline = "Your Business Intelligence Audit is Complete"
+        summary_lines = [
+            f"Waste Score: {result_data.get('waste_score', 0)}/100",
+            f"Hours Wasted Monthly: {result_data.get('total_hours_wasted', 'N/A')}",
+            f"Estimated Annual Cost: ${result_data.get('annual_cost', 0):,}",
+        ]
+        if result_data.get('top_waste_zones'):
+            zones = [z.get('name', '') for z in result_data['top_waste_zones'][:3]]
+            summary_lines.append(f"Top Waste Zones: {', '.join(zones)}")
+        cta_text = "Talk to Nuru — Get Your Fix Plan"
+
+    elif tool_number == 4:
+        subject = f"Your AI Readiness Score — {result_data.get('readiness_score', 0)}/100"
+        headline = "Your AI Readiness Scan is Complete"
+        summary_lines = [
+            f"Readiness Score: {result_data.get('readiness_score', 0)}/100",
+        ]
+        if result_data.get('blocking_factors'):
+            summary_lines.append(f"Key Blockers: {', '.join(result_data['blocking_factors'][:3])}")
+        cta_text = "Talk to Nuru — See How to Improve"
+
+    elif tool_number == 5:
+        subject = f"Your ROI Projection — ${result_data.get('annual_savings', 0):,} potential annual savings"
+        headline = "Your ROI Projection is Ready"
+        summary_lines = [
+            f"Projected Annual Savings: ${result_data.get('annual_savings', 0):,}",
+            f"Implementation Cost: ${result_data.get('implementation_cost', 0):,}",
+            f"Payback Period: {result_data.get('payback_months', 'N/A')} months",
+        ]
+        cta_text = "Talk to Nuru — Start Your Project"
+
+    else:
+        return False
+
+    # Build Nuru deep-link with session context
+    nuru_url = "https://eliombogo.com/#nuru"
+    if result_data.get('session_id'):
+        nuru_url = f"https://eliombogo.com/#nuru?session={result_data['session_id']}"
+
+    summary_html = ''.join([
+        f"<p style='margin: 6px 0;'>✅ <strong>{line}</strong></p>"
+        for line in summary_lines
+    ])
+    summary_text = '\n'.join([f"✅ {line}" for line in summary_lines])
+
+    html = f"""
+<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+  <div style="background: #1a2332; color: white; padding: 24px; border-radius: 8px 8px 0 0;">
+    <h2 style="margin: 0; color: #10b981;">LocalOS Intelligence Platform</h2>
+    <p style="margin: 8px 0 0; color: #9ca3af; font-size: 14px;">{headline}</p>
+  </div>
+  <div style="background: #f9fafb; padding: 24px; border: 1px solid #e5e7eb;">
+    <h3 style="color: #1a2332; margin-top: 0;">Your Results</h3>
+    {summary_html}
+  </div>
+  <div style="background: white; padding: 24px; border: 1px solid #e5e7eb; border-top: none;">
+    <p style="color: #374151; margin-top: 0;">
+      Nuru has analysed your results and can show you exactly what to fix first,
+      how long it takes, and what it costs — based on your specific numbers.
+    </p>
+    <div style="text-align: center; margin: 24px 0;">
+      <a href="{nuru_url}"
+         style="background: #10b981; color: white; padding: 14px 28px; border-radius: 6px;
+                text-decoration: none; font-weight: bold; font-size: 16px; display: inline-block;">
+        {cta_text}
+      </a>
+    </div>
+    <p style="color: #6b7280; font-size: 13px; text-align: center;">
+      Or book a discovery call:
+      <a href="https://calendly.com/eli-eliombogo/discovery-call" style="color: #10b981;">
+        calendly.com/eli-eliombogo/discovery-call
+      </a>
+    </p>
+  </div>
+  <div style="background: #1a2332; padding: 16px; border-radius: 0 0 8px 8px; text-align: center;">
+    <p style="color: #9ca3af; font-size: 12px; margin: 0;">
+      LocalOS — Intelligence Waste Auditors | eliombogo.com
+    </p>
+  </div>
+</div>"""
+
+    text = f"""{headline}
+
+{summary_text}
+
+Nuru has your results and can map out exactly what to fix first.
+
+Talk to Nuru: {nuru_url}
+Book a call: https://calendly.com/eli-eliombogo/discovery-call
+
+LocalOS — eliombogo.com
+"""
+
+    try:
+        response = requests.post(
+            'https://api.resend.com/emails',
+            headers={
+                'Authorization': f'Bearer {resend_api_key}',
+                'Content-Type': 'application/json'
+            },
+            json={
+                'from': from_email,
+                'to': [user_email],
+                'subject': subject,
+                'html': html,
+                'text': text
+            },
+            timeout=10
+        )
+
+        if response.status_code in [200, 201]:
+            print(f"✅ Tool #{tool_number} completion email sent to {user_email}")
+            return True
+        else:
+            print(f"❌ Tool completion email failed: {response.status_code} - {response.text}")
+            return False
+
+    except Exception as e:
+        print(f"❌ Tool completion email error: {e}")
+        return False
+
+
+# ============================================
+# TOOL COMPLETION ENDPOINT — ISSUE 1 FIX
+# NEW: Tools #3/4/5 call this after user submits email
+# ============================================
+
+@app.route('/api/notify-completion', methods=['POST'])
+def notify_completion():
+    """
+    Called by Tools #3, #4, #5 when user enters email after completing audit.
+    Sends user their results + CTA to talk to Nuru.
+    Also sends Eli a WhatsApp alert (warm lead signal).
+
+    Expected payload:
+    {
+        "tool_number": 3,
+        "user_email": "user@example.com",
+        "session_id": "abc123",
+        "result_data": { ...tool-specific fields... }
+    }
+    """
+    try:
+        data = request.json
+        tool_number = data.get('tool_number')
+        user_email = data.get('user_email')
+        session_id = data.get('session_id')
+        result_data = data.get('result_data', {})
+
+        if not tool_number or not user_email:
+            return jsonify({'error': 'tool_number and user_email are required'}), 400
+
+        # Attach session_id so email deep-links back to Nuru with context
+        result_data['session_id'] = session_id
+
+        # Send user their results
+        email_sent = send_tool_completion_email(user_email, tool_number, result_data)
+
+        # Alert Eli on WhatsApp — warm lead (they completed a tool AND gave email)
+        whatsapp_message = (
+            f"🔔 Tool #{tool_number} completed\n"
+            f"Email captured: {user_email}\n"
+            f"Session: {session_id}\n"
+            f"LocalOS — eliombogo.com"
+        )
+        send_whatsapp_notification(whatsapp_message)
+
+        return jsonify({
+            'success': email_sent,
+            'message': f'Tool #{tool_number} completion email {"sent" if email_sent else "failed"} to {user_email}'
+        })
+
+    except Exception as e:
+        print(f"❌ notify_completion error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ============================================
 # EXTRACT LEAD DATA FROM CONVERSATION HISTORY
 # Issue 5 fix: read actual messages before building lead_data
 # ============================================
@@ -148,28 +393,23 @@ def extract_lead_data_from_history(conversation_id, cursor):
     )
     messages = cursor.fetchall()
     
-    # Concatenate all user messages for extraction
     user_text = ' '.join([m['content'] for m in messages if m['role'] == 'user'])
     all_text = ' '.join([m['content'] for m in messages])
     
     lead_data = {}
 
-    # Extract email
     email_match = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', user_text)
     if email_match:
         lead_data['email'] = email_match.group(0)
 
-    # Extract phone (international formats)
     phone_match = re.search(r'(\+?\d[\d\s\-().]{7,}\d)', user_text)
     if phone_match:
         lead_data['phone'] = phone_match.group(0).strip()
 
-    # Extract budget (any $ amount or budget mention with number)
     budget_match = re.search(r'\$[\d,]+[kK]?|\b(\d+[kK])\s*(budget|dollars?|USD)|\bbudget\s*(of|is|around|about)?\s*\$?[\d,]+[kK]?', user_text, re.IGNORECASE)
     if budget_match:
         lead_data['budget'] = budget_match.group(0).strip()
     
-    # Extract company name - look for patterns like "my company is X", "we're at X", "I work at X"
     company_patterns = [
         r"(?:my company|our company|company name|we(?:'re| are) (?:at |called |named )?|i work (?:at|for) |business (?:is |called )?)([\w\s&.,'-]{2,40}?)(?:\.|,|\s+and|\s+we|\s+our|\s+i |$)",
         r"(?:at|for|from)\s+([A-Z][a-zA-Z\s&.,'-]{2,30}?)(?:\s+(?:and|we|our|i )|[.,]|$)"
@@ -182,7 +422,6 @@ def extract_lead_data_from_history(conversation_id, cursor):
                 lead_data['company'] = candidate
                 break
 
-    # Extract industry from common keywords
     industry_keywords = {
         'logistics': 'Logistics', 'transport': 'Transport', 'shipping': 'Logistics',
         'healthcare': 'Healthcare', 'hospital': 'Healthcare', 'clinic': 'Healthcare',
@@ -202,16 +441,13 @@ def extract_lead_data_from_history(conversation_id, cursor):
             lead_data['industry'] = industry
             break
 
-    # Extract problem summary — first user message is usually the clearest statement
     user_messages = [m['content'] for m in messages if m['role'] == 'user']
     if user_messages:
-        # Use first substantive user message (>20 chars) as problem description
         for msg in user_messages:
             if len(msg) > 20:
                 lead_data['problem'] = msg[:300] + ('...' if len(msg) > 300 else '')
                 break
 
-    # Extract timeline signals
     timeline_patterns = ['this week', 'this month', 'next month', 'asap', 'urgent',
                         'q1', 'q2', 'q3', 'q4', '2 weeks', '1 month', '3 months', '6 months']
     for pattern in timeline_patterns:
@@ -223,11 +459,12 @@ def extract_lead_data_from_history(conversation_id, cursor):
 
 
 # ============================================
-# NOTIFY ELI - QUALIFIED LEAD
+# NOTIFY ELI — QUALIFIED LEAD (EMAIL + WHATSAPP)
+# UPDATED: now fires WhatsApp alongside existing email
 # ============================================
 
 def notify_eli_qualified_lead(conversation_id, lead_data, audit_contexts):
-    """Notify Eli via email when qualified lead detected"""
+    """Notify Eli via email AND WhatsApp when qualified lead detected"""
     try:
         body = f"""QUALIFIED LEAD - LocalOS
 {'='*50}
@@ -279,7 +516,6 @@ Calendly: https://calendly.com/eli-eliombogo/discovery-call
     <h2 style="margin: 0; color: #10b981;">🎯 Qualified Lead - LocalOS</h2>
     <p style="margin: 5px 0 0; color: #9ca3af; font-size: 14px;">{datetime.now().strftime('%B %d, %Y at %H:%M UTC')}</p>
   </div>
-  
   <div style="background: #f9fafb; padding: 20px; border: 1px solid #e5e7eb;">
     <h3 style="color: #1a2332; border-bottom: 2px solid #10b981; padding-bottom: 8px;">Lead Details</h3>
     <p><strong>Company:</strong> {lead_data.get('company', 'Not captured yet')}</p>
@@ -324,12 +560,25 @@ Calendly: https://calendly.com/eli-eliombogo/discovery-call
   </div>
 </div>"""
 
+        # Send email (existing)
         email_sent = send_email_notification(
             subject=f"🎯 Qualified Lead - LocalOS | Conversation {conversation_id}",
             body_text=body,
             body_html=html
         )
 
+        # NEW: Send WhatsApp alert (short, actionable)
+        whatsapp_msg = (
+            f"🎯 QUALIFIED LEAD\n"
+            f"Company: {lead_data.get('company', 'Unknown')}\n"
+            f"Budget: {lead_data.get('budget', 'Not stated')}\n"
+            f"Contact: {lead_data.get('email', 'Not captured')}\n"
+            f"Problem: {str(lead_data.get('problem', ''))[:100]}\n"
+            f"Check email for full details."
+        )
+        whatsapp_sent = send_whatsapp_notification(whatsapp_msg)
+
+        # Post to Google Sheets webhook (existing)
         webhook_sent = False
         try:
             webhook_url = "https://script.google.com/macros/s/AKfycbw_DUBZMbh47xMP5Lg83Q04o66oDQFwdO6qM7pixoN4BzVLkR9iz4EiT2WrPU2NTAANlw/exec"
@@ -348,7 +597,7 @@ Calendly: https://calendly.com/eli-eliombogo/discovery-call
         except Exception as webhook_error:
             print(f"Webhook failed: {webhook_error}")
 
-        print(f"Eli notified of qualified lead (conversation {conversation_id}) - Email: {email_sent}, Webhook: {webhook_sent}")
+        print(f"Eli notified (conversation {conversation_id}) — Email: {email_sent}, WhatsApp: {whatsapp_sent}, Webhook: {webhook_sent}")
 
     except Exception as e:
         print(f"Failed to notify Eli: {e}")
@@ -641,11 +890,8 @@ def check_qualification(conversation_id, assistant_message, user_message, audit_
         already_notified = cursor.fetchone()
 
         if not already_notified:
-            # FIX: Extract real lead data from conversation history before escalating
-            # Previously: lead_data was always empty {}, so email showed "Not provided" for everything
             lead_data = extract_lead_data_from_history(conversation_id, cursor)
 
-            # Also pull company/industry from audit context if not found in conversation
             if not lead_data.get('company') and 'tool3' in audit_contexts:
                 lead_data['company'] = audit_contexts['tool3'].get('company_name', '')
             if not lead_data.get('industry') and 'tool3' in audit_contexts:
@@ -718,7 +964,7 @@ def health():
 
 
 # ============================================
-# TEST EMAIL ENDPOINT (FOR DEBUGGING)
+# TEST ENDPOINTS
 # ============================================
 
 @app.route('/api/test-email', methods=['GET'])
@@ -782,6 +1028,29 @@ def test_email():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/test-whatsapp', methods=['GET'])
+def test_whatsapp():
+    """
+    NEW: Test WhatsApp via CallMeBot.
+    Hit this URL after setting CALLMEBOT_API_KEY in Railway vars.
+    URL: tool6-client-intake-production.up.railway.app/api/test-whatsapp
+    """
+    sent = send_whatsapp_notification(
+        f"🧪 CallMeBot test — LocalOS Nuru backend\n"
+        f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"If you see this, WhatsApp notifications are working ✅"
+    )
+    return jsonify({
+        'success': sent,
+        'message': 'WhatsApp test sent ✅' if sent else 'WhatsApp test failed ❌ — check CALLMEBOT_API_KEY in Railway vars',
+        'setup_reminder': (
+            'Save +34 644 59 72 10 as CallMeBot. '
+            'Send: I allow callmebot to send me messages. '
+            'Add the API key you receive to Railway as CALLMEBOT_API_KEY.'
+        )
+    })
 
 
 if __name__ == '__main__':
