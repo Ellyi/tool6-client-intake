@@ -19,6 +19,52 @@ function getSessionId() {
     return sessionId;
 }
 
+// ============================================
+// MARKDOWN PARSER - Converts **bold**, headers, lists to HTML
+// ============================================
+function parseMarkdown(text) {
+    if (!text) return '';
+
+    let html = text;
+
+    // Escape HTML entities first (prevent XSS)
+    html = html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // Headers: ### Header → <h4>, ## Header → <h3>
+    html = html.replace(/^### (.+)$/gm, '<h4 class="nuru-h4">$1</h4>');
+    html = html.replace(/^## (.+)$/gm, '<h3 class="nuru-h3">$1</h3>');
+
+    // Bold: **text** → <strong>
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+    // Italic: *text* → <em>  (only single asterisk, not double)
+    html = html.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+
+    // Bullet lists: lines starting with - or *
+    html = html.replace(/^[-•] (.+)$/gm, '<li>$1</li>');
+    // Wrap consecutive <li> in <ul>
+    html = html.replace(/(<li>.*<\/li>\n?)+/g, function(match) {
+        return '<ul class="nuru-list">' + match + '</ul>';
+    });
+
+    // Numbered lists: 1. item
+    html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+
+    // Horizontal rule: ---
+    html = html.replace(/^---+$/gm, '<hr class="nuru-divider">');
+
+    // Line breaks: double newline → paragraph break, single → <br>
+    html = html.replace(/\n\n/g, '</p><p class="nuru-p">');
+    html = html.replace(/\n/g, '<br>');
+
+    // Wrap in paragraph if not already wrapped in block element
+    if (!html.startsWith('<h') && !html.startsWith('<ul') && !html.startsWith('<ol')) {
+        html = '<p class="nuru-p">' + html + '</p>';
+    }
+
+    return html;
+}
+
 // Load context from any tool (Tool #3, #4, or #5)
 async function loadAuditContext() {
     const hashParams = window.location.hash.split('?')[1];
@@ -79,7 +125,15 @@ function addMessage(content, isUser = false) {
     
     const bubble = document.createElement('div');
     bubble.className = 'message-bubble';
-    bubble.innerHTML = content.replace(/\n/g, '<br>');
+
+    if (isUser) {
+        // User messages: plain text, just handle line breaks
+        bubble.innerHTML = content.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+    } else {
+        // AI messages: full markdown rendering
+        bubble.innerHTML = parseMarkdown(content);
+        bubble.classList.add('nuru-rendered');
+    }
     
     messageDiv.appendChild(avatar);
     messageDiv.appendChild(bubble);

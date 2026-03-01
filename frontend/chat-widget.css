@@ -218,3 +218,38 @@
         max-width: 90%;
     }
 }
+/* Nuru Markdown Rendering */
+.nuru-rendered .nuru-h3 {
+    font-size: 1rem;
+    font-weight: 700;
+    color: #111827;
+    margin: 0.75rem 0 0.25rem;
+}
+
+.nuru-rendered .nuru-h4 {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: #374151;
+    margin: 0.5rem 0 0.25rem;
+}
+
+.nuru-rendered .nuru-list {
+    margin: 0.5rem 0;
+    padding-left: 1.25rem;
+}
+
+.nuru-rendered .nuru-list li {
+    margin-bottom: 0.25rem;
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+.nuru-rendered .nuru-divider {
+    border-top: 1px solid #e5e7eb;
+    margin: 0.75rem 0;
+}
+
+.nuru-rendered strong {
+    font-weight: 700;
+    color: #111827;
+}
