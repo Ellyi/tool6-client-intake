@@ -309,6 +309,38 @@ def notify_completion():
         return jsonify({'error': str(e)}), 500
 
 # ============================================
+# ADDITION 1 — SERVER-SIDE OUTPUT FILTER
+# Catches prompt reflection before client sees it.
+# Logs as security event. Returns safe fallback.
+# ============================================
+PROMPT_SENTINELS = [
+    "you are nuru",
+    "intelligence os for localos",
+    "discovery first",
+    "six data gates",
+    "visitor taxonomy",
+    "sherlock",
+    "waste evidence markers",
+    "credibility killer blacklist",
+]
+
+def filter_assistant_response(response_text):
+    """
+    Check if response contains system prompt content.
+    If detected — return safe fallback + flag for logging.
+    Returns (filtered_text, was_filtered)
+    """
+    response_lower = response_text.lower()
+    for sentinel in PROMPT_SENTINELS:
+        if sentinel in response_lower:
+            print(f"⚠️ OUTPUT FILTER TRIGGERED: sentinel '{sentinel}' detected")
+            return (
+                "I'm here to help diagnose your business challenges. What are you working on?",
+                True
+            )
+    return response_text, False
+
+# ============================================
 # INTELLIGENCE LAYER — VISITOR METADATA
 # Captures origin, device, referrer on first message
 # Non-blocking — runs in background thread
@@ -925,8 +957,173 @@ def log_email_capture_async(conversation_id, email, turn_number, industry,
         cur.close()
         release_db_connection(conn)
         print(f"✅ Email captured: {email} at turn {turn_number}")
+
+        # ADDITION 2 — Send client their personalised brief automatically
+        notify_in_background(
+            send_client_personalised_brief,
+            email, conversation_id, industry, pain_summary,
+            segment, [], turn_number
+        )
+
     except Exception as e:
         print(f"❌ Email capture log failed: {e}")
+
+# ============================================
+# ADDITION 2 — EMAIL: PERSONALISED BRIEF TO CLIENT
+# Triggered automatically when email captured mid-conversation.
+# Client gets their waste summary + CTA. No manual step for Eli.
+# ============================================
+def send_client_personalised_brief(email, conversation_id, industry, pain_summary,
+                                    visitor_segment, waste_patterns, turn_captured):
+    resend_api_key = os.getenv('RESEND_API_KEY')
+    from_email = os.getenv('FROM_EMAIL', 'nuru@eliombogo.com')
+    if not resend_api_key or not email:
+        return False
+
+    industry_display = industry or 'your industry'
+    pain_display = pain_summary[:200] if pain_summary else 'the operational challenges you described'
+    subject = "Your Intelligence Waste Summary — LocalOS"
+
+    body_html = f"""
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+  <div style="background:#0d1520;color:white;padding:24px;border-radius:8px 8px 0 0;">
+    <h2 style="margin:0;color:#10b981;font-family:Georgia,serif;">LocalOS Intelligence Platform</h2>
+    <p style="margin:8px 0 0;color:#9ca3af;font-size:14px;">Your Personalised Waste Summary</p>
+  </div>
+  <div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb;">
+    <h3 style="color:#0d1520;margin-top:0;">What Nuru found in your conversation</h3>
+    <div style="background:white;border-left:4px solid #10b981;padding:16px;margin:16px 0;border-radius:0 6px 6px 0;">
+      <p style="margin:0;color:#374151;font-size:15px;line-height:1.6;">
+        <strong>Industry:</strong> {html.escape(industry_display)}<br>
+        <strong>Situation described:</strong> {html.escape(pain_display)}
+      </p>
+    </div>
+    <p style="color:#374151;line-height:1.6;">
+      Based on what you shared, there are likely recoverable hours and costs in your operation
+      that don't show up on any KPI or report — which is exactly why they persist.
+    </p>
+    <p style="color:#374151;line-height:1.6;">
+      Eli Ombogo has been notified and will review your conversation before any follow-up.
+      You won't need to repeat yourself.
+    </p>
+  </div>
+  <div style="background:white;padding:24px;border:1px solid #e5e7eb;border-top:none;">
+    <h4 style="color:#0d1520;margin-top:0;">Your next step</h4>
+    <p style="color:#374151;">Run a free diagnostic to quantify exactly what your waste is costing you — before committing to anything.</p>
+    <div style="text-align:center;margin:20px 0;">
+      <a href="https://eliombogo.com/tool3/"
+         style="background:#10b981;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:15px;display:inline-block;margin:6px;">
+        Run Intelligence Audit
+      </a>
+      <a href="https://calendly.com/eli-eliombogo/discovery-call"
+         style="background:#1a2332;color:white;padding:14px 28px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:15px;display:inline-block;margin:6px;">
+        Book 30-Min Call
+      </a>
+    </div>
+  </div>
+  <div style="background:#0d1520;padding:16px;border-radius:0 0 8px 8px;text-align:center;">
+    <p style="color:#9ca3af;font-size:12px;margin:0;">LocalOS — Intelligence Waste Auditors | eliombogo.com</p>
+  </div>
+</div>"""
+
+    body_text = f"""Your Intelligence Waste Summary — LocalOS
+
+Industry: {industry_display}
+Situation: {pain_display}
+
+There are recoverable hours and costs in your operation that don't show up on any report — which is why they persist.
+
+Eli Ombogo has been notified and will review your conversation. You won't need to repeat yourself.
+
+Next steps:
+- Run free Intelligence Audit: https://eliombogo.com/tool3/
+- Book 30-min call: https://calendly.com/eli-eliombogo/discovery-call
+
+LocalOS — Intelligence Waste Auditors | eliombogo.com"""
+
+    try:
+        response = requests.post(
+            'https://api.resend.com/emails',
+            headers={'Authorization': f'Bearer {resend_api_key}', 'Content-Type': 'application/json'},
+            json={'from': from_email, 'to': [email], 'subject': subject, 'html': body_html, 'text': body_text},
+            timeout=10
+        )
+        success = response.status_code in [200, 201]
+        print(f"✅ Client brief {'sent' if success else 'FAILED'}: {email}")
+        return success
+    except Exception as e:
+        print(f"❌ Client brief error: {e}")
+        return False
+
+# ============================================
+# ADDITION 3 — LEAD QUALITY GATE
+# Minimum 3 of 6 gates confirmed before conversation
+# surfaces as a lead in the admin dashboard.
+# Filters joke/test/irrelevant conversations.
+# ============================================
+def passes_lead_quality_gate(conversation_id, cursor):
+    gates_confirmed = 0
+
+    cursor.execute("""
+        SELECT industry_detected, pain_vocabulary, total_turns,
+               ai_literacy_zone, path_type, visitor_segment
+        FROM conversation_intelligence WHERE conversation_id = %s
+    """, (conversation_id,))
+    intel = cursor.fetchone()
+
+    cursor.execute("""
+        SELECT content FROM messages
+        WHERE conversation_id = %s AND role = 'user'
+        ORDER BY created_at
+    """, (conversation_id,))
+    user_msgs = [m['content'] for m in cursor.fetchall()]
+    all_user_text = ' '.join(user_msgs).lower()
+
+    # Gate 1 — Org type mentioned
+    org_signals = [
+        'company', 'business', 'firm', 'hospital', 'clinic', 'school', 'factory',
+        'shop', 'agency', 'startup', 'ltd', 'limited', 'we are', 'we have',
+        'our team', 'my team', 'our company', 'my business', 'we run', 'i run', 'i own'
+    ]
+    if any(s in all_user_text for s in org_signals):
+        gates_confirmed += 1
+
+    # Gate 2 — Industry detected
+    if intel and intel.get('industry_detected'):
+        gates_confirmed += 1
+
+    # Gate 3 — Waste pattern in their words
+    if intel and intel.get('pain_vocabulary'):
+        pain = intel['pain_vocabulary']
+        if (isinstance(pain, list) and len(pain) > 0) or \
+           (isinstance(pain, str) and pain not in ['[]', '', 'null']):
+            gates_confirmed += 1
+
+    # Gate 4 — Scale signal
+    if re.search(
+        r'\b(\d+)\s*(staff|employees|people|team members|trucks|beds|lawyers|agents|branches|locations|orders|invoices|shipments)\b',
+        all_user_text
+    ):
+        gates_confirmed += 1
+
+    # Gate 5 — Decision/budget signal
+    decision_signals = [
+        'budget', 'i decide', 'we decide', 'my call', 'i approve',
+        'willing to spend', 'allocated', 'we have funds', 'director',
+        'manager', 'ceo', 'cfo', 'coo', 'owner', 'founder',
+        'i need to check with', 'need approval', 'board'
+    ]
+    if any(s in all_user_text for s in decision_signals):
+        gates_confirmed += 1
+
+    # Gate 6 — Minimum real engagement (3+ substantive turns)
+    real_turns = sum(1 for m in user_msgs if len(m.strip()) > 15)
+    if real_turns >= 3:
+        gates_confirmed += 1
+
+    passes = gates_confirmed >= 3
+    print(f"Lead quality gate: {gates_confirmed}/6 confirmed — {'PASS ✅' if passes else 'FAIL ❌'}")
+    return passes
 
 # ============================================
 # LEAD DATA EXTRACTION
@@ -1343,6 +1540,11 @@ def check_qualification(conversation_id, assistant_message, user_message, audit_
         already_notified = cursor.fetchone()
 
         if not already_notified:
+            # ADDITION 3 — Lead quality gate: filter joke/test conversations
+            if not passes_lead_quality_gate(conversation_id, cursor):
+                print(f"Lead quality gate FAILED for conv {conversation_id} — not surfacing")
+                return
+
             lead_data = extract_lead_data_from_history(conversation_id, cursor)
 
             if not lead_data.get('company') and 'tool3' in audit_contexts:
@@ -1659,6 +1861,15 @@ def chat():
         )
 
         assistant_message = response.content[0].text
+
+        # ADDITION 1 — Server-side output filter: catches prompt reflection
+        assistant_message, was_filtered = filter_assistant_response(assistant_message)
+        if was_filtered:
+            notify_in_background(
+                log_security_event_async,
+                conversation_id, 'prompt_reflection', assistant_message, ip_address,
+                {'turn': turn_number, 'filtered': True}
+            )
 
         cur.execute(
             "INSERT INTO messages (conversation_id, role, content) VALUES (%s, %s, %s)",
