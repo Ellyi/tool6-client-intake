@@ -1737,6 +1737,10 @@ def chat():
             known_industry = (intel_row['industry_detected'] if intel_row else None) or detected_industry
             visitor_segment = auto_segment_visitor(conversation_id, known_industry, all_user_msgs)
 
+        # Commit conversation + message rows before firing background threads.
+        # Background threads reference conversation_id via FK — must exist first.
+        conn.commit()
+
         # ============================================
         # FIRST MESSAGE: trigger visitor metadata capture
         # ============================================
