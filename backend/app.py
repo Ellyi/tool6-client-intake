@@ -2106,7 +2106,7 @@ def chat():
         # Only fires once per conversation (suppress if already sent).
         # ============================================
         waste_map_payload = None
-        if turn_number >= 3 and detect_peak_insight(user_message):
+        if turn_number >= 4:
             # Check if Waste Map already sent this session
             cur.execute(
                 "SELECT outcome FROM conversation_intelligence WHERE conversation_id = %s",
