@@ -1802,10 +1802,14 @@ Return ONLY a valid JSON object with EXACTLY these keys. No preamble, no markdow
         waste_map = json.loads(raw)
         required_keys = ['waste_pattern', 'pattern_definition', 'their_words',
                          'estimated_monthly_cost', 'what_is_fixable',
-                         'what_needs_investigation', 'confidence']
+                         'what_needs_investigation']
         if not all(k in waste_map for k in required_keys):
             print(f"⚠️ Waste Map synthesis missing keys: {waste_map.keys()}")
             return None
+
+        # confidence is optional — default to medium if Claude omits it
+        if 'confidence' not in waste_map:
+            waste_map['confidence'] = 'medium'
 
         print(f"✅ Waste Map synthesised: {waste_map['waste_pattern']} ({waste_map['confidence']} confidence)")
         return waste_map
