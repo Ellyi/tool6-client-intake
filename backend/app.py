@@ -63,7 +63,12 @@ def init_pool():
             database=os.getenv('DB_NAME'),
             user=os.getenv('DB_USER'),
             password=os.getenv('DB_PASSWORD'),
-            port=os.getenv('DB_PORT')
+            port=os.getenv('DB_PORT'),
+            sslmode='require',
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=5
         )
         print("✅ Connection pool initialised (2-10 connections)")
     except Exception as e:
@@ -72,6 +77,12 @@ def init_pool():
 def get_db_connection():
     if db_pool:
         conn = db_pool.getconn()
+        # Test connection — discard and get fresh one if dead
+        try:
+            conn.cursor().execute("SELECT 1")
+        except Exception:
+            db_pool.putconn(conn, close=True)
+            conn = db_pool.getconn()
         conn.cursor_factory = RealDictCursor
         return conn
     return psycopg2.connect(
@@ -80,7 +91,12 @@ def get_db_connection():
         user=os.getenv('DB_USER'),
         password=os.getenv('DB_PASSWORD'),
         port=os.getenv('DB_PORT'),
-        cursor_factory=RealDictCursor
+        cursor_factory=RealDictCursor,
+        sslmode='require',
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5
     )
 
 def release_db_connection(conn):
