@@ -63,12 +63,7 @@ def init_pool():
             database=os.getenv('DB_NAME'),
             user=os.getenv('DB_USER'),
             password=os.getenv('DB_PASSWORD'),
-            port=os.getenv('DB_PORT'),
-            sslmode='require',
-            keepalives=1,
-            keepalives_idle=30,
-            keepalives_interval=10,
-            keepalives_count=5
+            port=os.getenv('DB_PORT')
         )
         print("✅ Connection pool initialised (2-10 connections)")
     except Exception as e:
@@ -77,12 +72,6 @@ def init_pool():
 def get_db_connection():
     if db_pool:
         conn = db_pool.getconn()
-        # Test connection — discard and get fresh one if dead
-        try:
-            conn.cursor().execute("SELECT 1")
-        except Exception:
-            db_pool.putconn(conn, close=True)
-            conn = db_pool.getconn()
         conn.cursor_factory = RealDictCursor
         return conn
     return psycopg2.connect(
@@ -91,12 +80,7 @@ def get_db_connection():
         user=os.getenv('DB_USER'),
         password=os.getenv('DB_PASSWORD'),
         port=os.getenv('DB_PORT'),
-        cursor_factory=RealDictCursor,
-        sslmode='require',
-        keepalives=1,
-        keepalives_idle=30,
-        keepalives_interval=10,
-        keepalives_count=5
+        cursor_factory=RealDictCursor
     )
 
 def release_db_connection(conn):
@@ -598,6 +582,27 @@ PAIN_SIGNALS = [
     'leakage', 'slipping through', 'fall through', 'miss',
 ]
 
+# Peak insight signals — moments when the client has revealed enough to warrant Waste Map
+# These phrases indicate the client owns the problem and is ready to see the diagnosis
+PEAK_INSIGHT_SIGNALS = [
+    # Ownership language
+    "my fault", "our fault", "i know it's us", "we keep doing this", "we always",
+    "nobody owns", "everyone just", "falls through", "slips through",
+    # Scale signals with frustration
+    "every single", "all the time", "constantly", "every week", "every month",
+    "been like this for", "years like this", "forever",
+    # Cost awareness
+    "costing us", "losing money", "wasting money", "burning time",
+    "i can't even calculate", "don't even want to know", "must be thousands",
+    # Decision readiness
+    "what would it cost", "how long would it take", "where do we start",
+    "what do you need from me", "ready to move", "let's do this",
+    "need to fix this", "need to solve this", "need help with this",
+    # Resignation to the problem
+    "just accepted it", "resigned to", "used to it", "normal for us",
+    "thought everyone had this", "assumed this was normal",
+]
+
 # Competitor mentions
 COMPETITOR_NAMES = [
     'zapier', 'make', 'integromat', 'n8n', 'chatgpt', 'openai', 'gpt',
@@ -987,31 +992,8 @@ def log_email_capture_async(conversation_id, email, turn_number, industry,
 # ============================================
 # ADDITION 2 — EMAIL: PERSONALISED BRIEF TO CLIENT
 # Triggered automatically when email captured mid-conversation.
-# Gate guard: requires 4+ data gates OR 5+ substantive turns with industry.
-# Prevents briefs firing from test/injection conversations.
+# Client gets their waste summary + CTA. No manual step for Eli.
 # ============================================
-def _count_brief_gates(conversation_id, industry, pain_summary, turn_captured):
-    """
-    Count how many data gates are confirmed before firing client brief.
-    Returns gate count (0-5). Brief fires at 4+.
-    Separate from lead quality gate — lighter, runs inline before DB connection needed.
-    """
-    gates = 0
-    if industry:
-        gates += 1  # Gate 2 — vertical detected
-    if pain_summary and len(pain_summary.strip()) > 30:
-        gates += 1  # Gate 3 — waste in their words (not trivially short)
-    if turn_captured and turn_captured >= 3:
-        gates += 1  # Gate 6 — real engagement (3+ turns before email drop)
-    # Gate 4 — scale signal: look for numbers in pain summary
-    if pain_summary and re.search(r'\b\d+\s*(staff|employees|people|team|trucks|beds|lawyers|orders|shipments|invoices|locations)\b', pain_summary, re.IGNORECASE):
-        gates += 1
-    # Gate 1 — org type mentioned
-    if pain_summary and any(s in pain_summary.lower() for s in ['company', 'business', 'firm', 'hospital', 'we ', 'our ', 'i run', 'i own']):
-        gates += 1
-    return gates
-
-
 def send_client_personalised_brief(email, conversation_id, industry, pain_summary,
                                     visitor_segment, waste_patterns, turn_captured):
     resend_api_key = os.getenv('RESEND_API_KEY')
@@ -1019,14 +1001,8 @@ def send_client_personalised_brief(email, conversation_id, industry, pain_summar
     if not resend_api_key or not email:
         return False
 
-    # GATE GUARD — require at least 4 gates before sending brief
-    gate_count = _count_brief_gates(conversation_id, industry, pain_summary, turn_captured)
-    if gate_count < 4:
-        print(f"⚠️ Client brief suppressed for {email} — only {gate_count}/5 gates confirmed. Minimum 4 required.")
-        return False
-
     industry_display = industry or 'your industry'
-    pain_display = pain_summary[:300] if pain_summary else 'the operational challenges you described'
+    pain_display = pain_summary[:200] if pain_summary else 'the operational challenges you described'
     subject = "Your Intelligence Waste Summary — LocalOS"
 
     body_html = f"""
@@ -1094,7 +1070,7 @@ LocalOS — Intelligence Waste Auditors | eliombogo.com"""
             timeout=10
         )
         success = response.status_code in [200, 201]
-        print(f"✅ Client brief {'sent' if success else 'FAILED'}: {email} ({gate_count}/5 gates confirmed)")
+        print(f"✅ Client brief {'sent' if success else 'FAILED'}: {email}")
         return success
     except Exception as e:
         print(f"❌ Client brief error: {e}")
@@ -1249,196 +1225,90 @@ def extract_lead_data_from_history(conversation_id, cursor):
     return lead_data
 
 # ============================================
-# NOTIFY ELI — PRE-MEETING INTELLIGENCE BRIEF
-# Replaces the old dumb form with a Claude-generated
-# forensic analysis of the full conversation.
-# Eli never walks into a discovery call cold.
+# NOTIFY ELI — QUALIFIED LEAD
 # ============================================
-def _fetch_full_transcript(conversation_id):
-    """Pull complete conversation transcript from DB."""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT role, content FROM messages WHERE conversation_id = %s ORDER BY created_at",
-            (conversation_id,)
-        )
-        messages = cur.fetchall()
-        cur.close()
-        release_db_connection(conn)
-        lines = []
-        for m in messages:
-            label = "CLIENT" if m['role'] == 'user' else "NURU"
-            lines.append(f"{label}: {m['content']}")
-        return "\n\n".join(lines)
-    except Exception as e:
-        print(f"❌ Transcript fetch failed: {e}")
-        return ""
-
-
-def _generate_intelligence_brief(transcript, lead_data, audit_contexts):
-    """
-    Call Claude to generate a structured Pre-Meeting Intelligence Brief
-    from the full conversation transcript.
-    Returns plain text brief. Falls back to basic summary on failure.
-    """
-    anthropic_key = os.getenv('ANTHROPIC_API_KEY')
-    if not anthropic_key or not transcript:
-        return None
-
-    audit_context_block = ""
-    if 'tool3' in audit_contexts:
-        ctx = audit_contexts['tool3']
-        audit_context_block += f"\nTool 3 Waste Score: {ctx.get('waste_score')}/100"
-        audit_context_block += f"\nTop Waste Zones: {', '.join([z.get('name','') for z in ctx.get('top_waste_zones', [])[:3]])}"
-        audit_context_block += f"\nHours Wasted Monthly: {ctx.get('total_hours_wasted')}"
-    if 'tool4' in audit_contexts:
-        audit_context_block += f"\nTool 4 AI Readiness: {audit_contexts['tool4'].get('readiness_score')}/100"
-    if 'tool5' in audit_contexts:
-        audit_context_block += f"\nTool 5 ROI Projection: ${audit_contexts['tool5'].get('annual_savings', 0):,} annual savings"
-
-    prompt = f"""You are the intelligence layer for LocalOS, an AI Systems Architecture firm run by Eli Ombogo in Nairobi. 
-A qualified lead just completed a conversation with Nuru (our intake AI). 
-Your job is to generate a Pre-Meeting Intelligence Brief for Eli — so he walks into the discovery call already knowing more about this client's business than they expect.
-
-FULL CONVERSATION TRANSCRIPT:
-{transcript}
-
-AUDIT TOOL DATA (if available):
-{audit_context_block if audit_context_block else "No audit tool data — conversation only."}
-
-Generate the brief in this EXACT structure. Be specific. Use the client's own words where possible. No generic statements.
-
----
-PRE-MEETING INTELLIGENCE BRIEF
-Client: {lead_data.get('company', 'Unknown')} | {lead_data.get('industry', 'Unknown')} | {lead_data.get('email', 'Unknown')}
-Prepared by: Nuru | {datetime.now().strftime('%B %d, %Y at %H:%M UTC')}
----
-
-CLIENT SNAPSHOT
-[2-3 sentences: who they are, what they do, their scale. Use numbers from conversation if given.]
-
-WHAT THEY TOLD NURU (IN THEIR OWN WORDS)
-[Their exact description of the problem. Quote their language. Do not paraphrase into jargon.]
-
-NURU'S WASTE DIAGNOSIS
-Primary waste pattern: [Decision Latency / Information Scavenging / Defect Loop / Silo Friction / Cognitive Load Waste — pick the most accurate]
-False problem presented: [What they said the problem was]
-Root cause underneath: [What the real problem actually is]
-Estimated monthly cost: [Calculate from people × time × rate if numbers given. Use "$X,000–$Y,000/month" format. If no numbers, say "Insufficient data — quantify in call."]
-
-SYSTEMS LANDSCAPE
-[List any ERP, CRM, tools, portals, or integrations they mentioned. If none mentioned, say "Not disclosed — ask in call."]
-
-DECISION ARCHITECTURE
-Buyer or influencer: [Who they appear to be based on how they talk about decisions]
-Budget signal: [Any figure mentioned, or "Not stated"]
-Approval chain: [Who else needs to be in the room, if mentioned]
-Timeline: [Urgency level and any dates mentioned]
-
-WHAT ELI SHOULD PROPOSE
-[1-2 sentences: based on the waste pattern and their scale, what is the likely build? Be specific — e.g. "Invoice processing automation with exception-flagging logic, estimated 4-6 weeks, $8K–$12K range." If insufficient data, say what's needed to scope.]
-
-THREE QUESTIONS TO ASK IN THE CALL
-1. [Specific question that will unlock the most important unknown]
-2. [Question to confirm or deny Nuru's root cause hypothesis]
-3. [Question to clarify decision-making and next step]
-
-WATCH OUT FOR
-[Any red flags, hesitations, or signals from the conversation that Eli should be aware of. If none, say "No flags detected."]
----"""
-
-    try:
-        client = anthropic.Anthropic(api_key=anthropic_key)
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1200,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        brief = response.content[0].text
-        print(f"✅ Intelligence brief generated ({len(brief)} chars)")
-        return brief
-    except Exception as e:
-        print(f"❌ Brief generation failed: {e}")
-        return None
-
-
 def notify_eli_qualified_lead(conversation_id, lead_data, audit_contexts):
     try:
-        # Pull full transcript
-        transcript = _fetch_full_transcript(conversation_id)
+        body = f"""QUALIFIED LEAD - LocalOS
+{'='*50}
 
-        # Generate intelligence brief via Claude
-        intelligence_brief = _generate_intelligence_brief(transcript, lead_data, audit_contexts)
+LEAD DETAILS:
+Company: {lead_data.get('company', 'Not captured yet')}
+Industry: {lead_data.get('industry', 'Not captured yet')}
+Contact: {lead_data.get('email', 'Not captured yet')}
+Phone: {lead_data.get('phone', 'Not captured yet')}
 
-        # Fallback: if Claude call fails, use structured basic summary
-        if not intelligence_brief:
-            intelligence_brief = f"""PRE-MEETING INTELLIGENCE BRIEF (Basic — Claude generation failed)
-
-Company: {lead_data.get('company', 'Not captured')}
-Industry: {lead_data.get('industry', 'Not captured')}
-Contact: {lead_data.get('email', 'Not captured')}
-Phone: {lead_data.get('phone', 'Not captured')}
-Budget: {lead_data.get('budget', 'Not stated')}
+QUALIFICATION:
+Budget: {lead_data.get('budget', 'Mentioned in conversation')}
 Timeline: {lead_data.get('timeline', 'Not stated')}
 Problem: {lead_data.get('problem', 'See conversation')}
 
-Conversation ID: {conversation_id}
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}"""
+AUDIT DATA:"""
 
-        # Format HTML email — brief in a code-style block for readability
-        brief_html = intelligence_brief.replace('\n', '<br>').replace('---', '<hr style="border:1px solid #10b981;margin:12px 0;">')
+        if 'tool3' in audit_contexts:
+            ctx = audit_contexts['tool3']
+            body += f"\nTool #3 Waste Score: {ctx.get('waste_score')}/100"
+            body += f"\nTop Waste Zone: {ctx['top_waste_zones'][0]['name'] if ctx.get('top_waste_zones') else 'N/A'}"
+            body += f"\nHours Wasted: {ctx.get('total_hours_wasted')}/month"
+        if 'tool4' in audit_contexts:
+            body += f"\nTool #4 Readiness: {audit_contexts['tool4'].get('readiness_score')}/100"
+        if 'tool5' in audit_contexts:
+            savings = audit_contexts['tool5'].get('annual_savings', 0)
+            body += f"\nTool #5 ROI: ${savings:,} annual savings"
+
+        body += f"""
+
+CONVERSATION ID: {conversation_id}
+TIME: {datetime.now().strftime('%Y-%m-%d %H:%M UTC')}
+
+ACTION: Book discovery call — calendly.com/eli-eliombogo/discovery-call
+"""
 
         html_body = f"""
-<div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;">
-  <div style="background:#0d1520;color:white;padding:20px;border-radius:8px 8px 0 0;">
-    <h2 style="margin:0;color:#10b981;">🎯 Pre-Meeting Intelligence Brief</h2>
-    <p style="margin:5px 0 0;color:#9ca3af;font-size:13px;">LocalOS | Nuru | {datetime.now().strftime('%B %d, %Y at %H:%M UTC')} | Conv ID: {conversation_id}</p>
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+  <div style="background:#1a2332;color:white;padding:20px;border-radius:8px 8px 0 0;">
+    <h2 style="margin:0;color:#10b981;">🎯 Qualified Lead - LocalOS</h2>
+    <p style="margin:5px 0 0;color:#9ca3af;font-size:14px;">{datetime.now().strftime('%B %d, %Y at %H:%M UTC')}</p>
   </div>
-  <div style="background:#f0fdf4;padding:20px;border:1px solid #bbf7d0;border-top:none;">
-    <p style="color:#166534;font-size:13px;margin:0 0 16px 0;">⚡ Read this before the call. Nuru has already done the forensic work.</p>
-    <div style="background:white;border:1px solid #e5e7eb;border-radius:6px;padding:20px;font-family:Georgia,serif;font-size:14px;line-height:1.8;color:#1a2332;">
-      {brief_html}
-    </div>
+  <div style="background:#f9fafb;padding:20px;border:1px solid #e5e7eb;">
+    <h3 style="color:#1a2332;border-bottom:2px solid #10b981;padding-bottom:8px;">Lead Details</h3>
+    <p><strong>Company:</strong> {html.escape(str(lead_data.get('company', 'Not captured yet')))}</p>
+    <p><strong>Industry:</strong> {html.escape(str(lead_data.get('industry', 'Not captured yet')))}</p>
+    <p><strong>Contact:</strong> {html.escape(str(lead_data.get('email', 'Not captured yet')))}</p>
+    <p><strong>Phone:</strong> {html.escape(str(lead_data.get('phone', 'Not captured yet')))}</p>
+    <p><strong>Budget:</strong> {html.escape(str(lead_data.get('budget', 'Mentioned in conversation')))}</p>
+    <p><strong>Timeline:</strong> {html.escape(str(lead_data.get('timeline', 'Not stated')))}</p>
+    <p><strong>Problem:</strong> {html.escape(str(lead_data.get('problem', 'See conversation')))}</p>
   </div>
-  <div style="background:white;padding:16px 20px;border:1px solid #e5e7eb;border-top:none;">
-    <p style="color:#374151;font-size:13px;margin:0 0 10px 0;">Quick links:</p>
+  <div style="background:#1a2332;padding:20px;border-radius:0 0 8px 8px;text-align:center;">
     <a href="https://calendly.com/eli-eliombogo/discovery-call"
-       style="background:#10b981;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:13px;display:inline-block;margin-right:8px;">
-      Open Calendly
+       style="background:#10b981;color:white;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:bold;display:inline-block;">
+      Book Discovery Call
     </a>
-    <a href="https://eliombogo.com/admin-dashboard.html"
-       style="background:#1a2332;color:white;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold;font-size:13px;display:inline-block;">
-      Admin Dashboard
-    </a>
-  </div>
-  <div style="background:#0d1520;padding:12px;border-radius:0 0 8px 8px;text-align:center;">
-    <p style="color:#9ca3af;font-size:11px;margin:0;">LocalOS Intelligence Platform | eliombogo.com</p>
+    <p style="color:#9ca3af;font-size:12px;margin-top:12px;">Conversation ID: {conversation_id} | Nuru - LocalOS</p>
   </div>
 </div>"""
 
         send_email_notification(
-            subject=f"🎯 Pre-Meeting Brief — {lead_data.get('company', 'New Lead')} | {lead_data.get('industry', '')}",
-            body_text=intelligence_brief,
+            subject=f"🎯 Qualified Lead - LocalOS | Conversation {conversation_id}",
+            body_text=body,
             body_html=html_body
         )
-
         send_whatsapp_notification(
-            f"🎯 QUALIFIED LEAD — BRIEF READY\n"
+            f"🎯 QUALIFIED LEAD\n"
             f"Company: {lead_data.get('company', 'Unknown')}\n"
-            f"Industry: {lead_data.get('industry', 'Unknown')}\n"
-            f"Contact: {lead_data.get('email', 'Not captured')}\n"
             f"Budget: {lead_data.get('budget', 'Not stated')}\n"
-            f"Check email for full intelligence brief."
+            f"Contact: {lead_data.get('email', 'Not captured')}\n"
+            f"Problem: {str(lead_data.get('problem', ''))[:100]}\n"
+            f"Check email for full brief."
         )
-
         try:
             requests.post(
                 "https://script.google.com/macros/s/AKfycbw_DUBZMbh47xMP5Lg83Q04o66oDQFwdO6qM7pixoN4BzVLkR9iz4EiT2WrPU2NTAANlw/exec",
                 json={
                     'type': 'qualified_lead',
                     'timestamp': datetime.now().isoformat(),
-                    'message': intelligence_brief,
+                    'message': body,
                     'lead_data': lead_data,
                     'conversation_id': str(conversation_id)
                 },
@@ -1770,6 +1640,185 @@ def load_cip_context_for_industry(industry):
         return ''
 
 # ============================================
+# WASTE MAP SYNTHESIS
+# Called when peak insight moment is detected.
+# Pulls all accumulated intel and generates a
+# structured Waste Map the client sees in-chat.
+# Second Claude call — synthesis prompt, not Nuru.
+# ============================================
+
+def detect_peak_insight(user_message):
+    """
+    Check if current user message contains peak insight signals.
+    Returns True if the client is showing ownership/readiness.
+    """
+    msg_lower = user_message.lower()
+    return any(signal in msg_lower for signal in PEAK_INSIGHT_SIGNALS)
+
+
+def _count_confirmed_gates(conversation_id, intel_record):
+    """
+    Count how many of the 6 data gates are confirmed.
+    Used to decide whether Waste Map synthesis should fire.
+    Minimum 3 gates required.
+    """
+    gates = 0
+
+    # Gate 1 — Industry detected
+    if intel_record and intel_record.get('industry_detected'):
+        gates += 1
+
+    # Gate 2 — Pain vocabulary collected
+    pain = intel_record.get('pain_vocabulary', []) if intel_record else []
+    if isinstance(pain, str):
+        try:
+            pain = json.loads(pain)
+        except Exception:
+            pain = []
+    if pain and len(pain) > 0:
+        gates += 1
+
+    # Gate 3 — Minimum turns (3+ = real conversation, not a test)
+    if intel_record and intel_record.get('total_turns', 0) >= 3:
+        gates += 1
+
+    # Gate 4 — AI literacy zone detected (they revealed how they think)
+    if intel_record and intel_record.get('ai_literacy_zone'):
+        gates += 1
+
+    # Gate 5 — Path type detected (urgency established)
+    if intel_record and intel_record.get('path_type'):
+        gates += 1
+
+    # Gate 6 — Visitor segment assigned (role + type known)
+    if intel_record and intel_record.get('visitor_segment') and \
+       intel_record['visitor_segment'] not in ['unknown_unknown_unknown', '']:
+        gates += 1
+
+    return gates
+
+
+def generate_waste_map_synthesis(conversation_id, intel_record, audit_contexts):
+    """
+    Calls Claude with a synthesis prompt to generate a structured Waste Map.
+    Returns a dict with waste_map fields, or None on failure.
+    Runs synchronously inside /api/chat — kept fast with max_tokens=600.
+    """
+    anthropic_key = os.getenv('ANTHROPIC_API_KEY')
+    if not anthropic_key:
+        return None
+
+    try:
+        # Pull full conversation transcript
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, content FROM messages WHERE conversation_id = %s ORDER BY created_at",
+            (conversation_id,)
+        )
+        messages = cur.fetchall()
+        cur.close()
+        release_db_connection(conn)
+
+        if not messages:
+            return None
+
+        # Build transcript block (last 12 messages max — keep synthesis call fast)
+        transcript_lines = []
+        for m in messages[-12:]:
+            label = "CLIENT" if m['role'] == 'user' else "NURU"
+            transcript_lines.append(f"{label}: {m['content']}")
+        transcript = "\n\n".join(transcript_lines)
+
+        # Extract intel
+        industry = intel_record.get('industry_detected', 'Unknown') if intel_record else 'Unknown'
+        pain_vocab = intel_record.get('pain_vocabulary', []) if intel_record else []
+        if isinstance(pain_vocab, str):
+            try:
+                pain_vocab = json.loads(pain_vocab)
+            except Exception:
+                pain_vocab = []
+        pain_phrases = ", ".join(pain_vocab[:5]) if pain_vocab else "not captured"
+        segment = intel_record.get('visitor_segment', 'unknown') if intel_record else 'unknown'
+
+        # Audit tool context block
+        audit_block = ""
+        if 'tool3' in audit_contexts:
+            ctx = audit_contexts['tool3']
+            audit_block += f"Waste Score: {ctx.get('waste_score')}/100\n"
+            audit_block += f"Hours Wasted Monthly: {ctx.get('total_hours_wasted')}\n"
+            audit_block += f"Annual Cost: ${ctx.get('annual_cost', 0):,}\n"
+            if ctx.get('top_waste_zones'):
+                zones = [z.get('name', '') for z in ctx['top_waste_zones'][:3]]
+                audit_block += f"Top Waste Zones: {', '.join(zones)}\n"
+        if 'tool4' in audit_contexts:
+            audit_block += f"AI Readiness: {audit_contexts['tool4'].get('readiness_score')}/100\n"
+        if 'tool5' in audit_contexts:
+            audit_block += f"ROI Projection: ${audit_contexts['tool5'].get('annual_savings', 0):,} annual savings\n"
+
+        synthesis_prompt = f"""You are the intelligence engine for LocalOS, an AI Systems Architecture firm.
+A client just had a diagnostic conversation with Nuru, our intake AI.
+Your job: synthesise the conversation into a structured Waste Map the client will see immediately in the chat widget.
+
+This is NOT a sales pitch. It is a clinical diagnosis in the client's own language.
+Be specific. Use numbers where available. Use their exact phrases where possible.
+Do NOT use generic consulting language. Do NOT mention LocalOS pricing or solutions.
+
+CONVERSATION (last 12 turns):
+{transcript}
+
+INTEL COLLECTED:
+Industry: {industry}
+Pain phrases used: {pain_phrases}
+Visitor segment: {segment}
+{audit_block if audit_block else "No audit tool data — conversation-only diagnosis."}
+
+Return ONLY a valid JSON object with EXACTLY these keys. No preamble, no markdown, no extra text:
+
+{{
+  "waste_pattern": "The single most accurate waste pattern name from: Decision Latency / Information Scavenging / Defect Loop / Silo Friction / Cognitive Load Waste",
+  "pattern_definition": "One sentence explaining what this pattern means in their specific context. Use their industry and their words.",
+  "their_words": "The most revealing phrase the client used. Quote it exactly or near-exactly.",
+  "estimated_monthly_cost": "Dollar range e.g. $3,000–$6,000/month. Base on people × time × rate if numbers exist. If no numbers: 'Not enough data to quantify — bring numbers to the call'",
+  "what_is_fixable": "One specific thing that could be eliminated or automated. Concrete, not vague.",
+  "what_needs_investigation": "The one unknown that must be answered before a solution can be scoped.",
+  "confidence": "high / medium / low — based on how much data was collected"
+}}"""
+
+        client = anthropic.Anthropic(api_key=anthropic_key)
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=600,
+            messages=[{"role": "user", "content": synthesis_prompt}]
+        )
+
+        raw = response.content[0].text.strip()
+        # Strip any accidental markdown fences
+        raw = re.sub(r'^```json\s*', '', raw)
+        raw = re.sub(r'^```\s*', '', raw)
+        raw = re.sub(r'\s*```$', '', raw)
+        raw = raw.strip()
+
+        waste_map = json.loads(raw)
+        required_keys = ['waste_pattern', 'pattern_definition', 'their_words',
+                         'estimated_monthly_cost', 'what_is_fixable',
+                         'what_needs_investigation', 'confidence']
+        if not all(k in waste_map for k in required_keys):
+            print(f"⚠️ Waste Map synthesis missing keys: {waste_map.keys()}")
+            return None
+
+        print(f"✅ Waste Map synthesised: {waste_map['waste_pattern']} ({waste_map['confidence']} confidence)")
+        return waste_map
+
+    except json.JSONDecodeError as e:
+        print(f"❌ Waste Map JSON parse failed: {e} | Raw: {raw[:200] if 'raw' in dir() else 'N/A'}")
+        return None
+    except Exception as e:
+        print(f"❌ Waste Map synthesis failed: {e}")
+        return None
+
+
+# ============================================
 # MAIN CHAT ENDPOINT — v2.0
 # Intelligence Layer fully integrated.
 # ============================================
@@ -2044,10 +2093,57 @@ def chat():
         check_qualification(conversation_id, assistant_message, user_message, audit_contexts, cur)
 
         conn.commit()
+
+        # ============================================
+        # WASTE MAP TRIGGER
+        # Fires when peak insight is detected AND minimum gates confirmed.
+        # Returns waste_map field alongside normal response.
+        # Widget renders it as a card in-chat immediately.
+        # Only fires once per conversation (suppress if already sent).
+        # ============================================
+        waste_map_payload = None
+        if turn_number >= 3 and detect_peak_insight(user_message):
+            # Check if Waste Map already sent this session
+            cur.execute(
+                "SELECT outcome FROM conversation_intelligence WHERE conversation_id = %s",
+                (conversation_id,)
+            )
+            intel_check = cur.fetchone()
+            already_sent = intel_check and intel_check.get('outcome') == 'waste_map_sent'
+
+            if not already_sent:
+                # Load full intel record for gate counting
+                cur.execute("""
+                    SELECT industry_detected, pain_vocabulary, total_turns,
+                           ai_literacy_zone, path_type, visitor_segment
+                    FROM conversation_intelligence WHERE conversation_id = %s
+                """, (conversation_id,))
+                intel_record = cur.fetchone()
+                gate_count = _count_confirmed_gates(conversation_id, intel_record)
+
+                if gate_count >= 3:
+                    waste_map_payload = generate_waste_map_synthesis(
+                        conversation_id, intel_record, audit_contexts
+                    )
+                    if waste_map_payload:
+                        # Mark as sent — never fire twice for same conversation
+                        notify_in_background(
+                            update_conversation_intelligence_async,
+                            conversation_id, turn_number, '',
+                            outcome='waste_map_sent'
+                        )
+                        print(f"✅ Waste Map fired for conv {conversation_id} at turn {turn_number}")
+                else:
+                    print(f"⚠️ Peak insight detected but only {gate_count}/6 gates — Waste Map suppressed")
+
         cur.close()
         release_db_connection(conn)
 
-        return jsonify({'response': assistant_message, 'session_id': session_id})
+        response_payload = {'response': assistant_message, 'session_id': session_id}
+        if waste_map_payload:
+            response_payload['waste_map'] = waste_map_payload
+
+        return jsonify(response_payload)
 
     except Exception as e:
         print(f"Chat error: {e}")
