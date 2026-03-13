@@ -29,6 +29,29 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024
 
 CORS(app, origins=["https://eliombogo.com", "https://www.eliombogo.com"])
 
+# ============================================
+# CORS FALLBACK — stamps header on ALL responses
+# including 429 rate-limit and 500 error responses
+# where Flask-CORS doesn't run. Without this,
+# browser sees no CORS header and blocks the response.
+# ============================================
+ALLOWED_ORIGINS = {"https://eliombogo.com", "https://www.eliombogo.com"}
+
+@app.after_request
+def inject_cors_headers(response):
+    origin = request.headers.get("Origin", "")
+    if origin in ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    return response
+
+@app.errorhandler(429)
+def rate_limit_handler(e):
+    response = jsonify({"error": "Too many requests. Please wait a moment and try again."})
+    response.status_code = 429
+    return response
+
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
@@ -2521,4 +2544,4 @@ init_pool()
 init_db()
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5000) 
